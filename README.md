@@ -39,7 +39,7 @@ Import the repo in Vercel (framework preset: Vite), optionally set `NVIDIA_API_K
 
 1. `scripts/svd_to_json.ts` converts each SVD to compact JSON (`npm run svd`). It resolves `derivedFrom` references, expands register and field arrays and clusters, and dedupes named-value tables. All four chips convert with zero unresolved references.
 2. The page decodes values in the browser with `src/lib/decode.ts`.
-3. `api/explain.ts` validates `{chip, register, value, question?}`, re-runs the same decoder, and calls NVIDIA Nemotron 3 Super through NVIDIA's OpenAI-compatible API, with reasoning off and the decoded facts only.
+3. `api/explain.ts` validates `{chip, register, value, question?}`, re-runs the same decoder, and calls NVIDIA Nemotron through NVIDIA's free OpenAI-compatible API with the decoded facts only. It tries a short list of Nemotron models and uses the first one the key can reach. Every `FIELD = 0b…` claim in the reply is checked against the decoder; a reply that misstates a value is retried once, and if it is still wrong RegLens shows the plain decoded summary instead.
 
 ## Data
 
