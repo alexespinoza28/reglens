@@ -515,4 +515,54 @@ button.primary:disabled {
   .regname {
     font-size: 18px;
   }
+
+  /* Field table becomes one card per field: name, bits and value on the
+     first line, the meaning on its own full-width line below. */
+  table.fields,
+  .fields tbody,
+  .fields tr,
+  .fields td {
+    display: block;
+  }
+  .fields thead {
+    display: none;
+  }
+  .fields tr {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    column-gap: 12px;
+    align-items: baseline;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .fields tr:last-child {
+    border-bottom: 0;
+  }
+  .fields td {
+    padding: 0;
+    border-bottom: 0;
+  }
+  .fields td:nth-child(4) {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+  }
+  .fields td.empty {
+    grid-column: 1 / -1;
+  }
+  select.meaning {
+    width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  /* 2-bit field boxes are about 42px wide here; fit names like MODER15. */
+  .seg-name {
+    font-size: 8px;
+    letter-spacing: -0.03em;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .bitno {
+    font-size: 8px;
+  }
 }
