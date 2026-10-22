@@ -38,8 +38,9 @@ Rules:
 - Use only the decoded fields given. Never invent field names, bit positions, or value meanings. Copy each field's value and meaning exactly as listed; never restate a meaning differently. If a field has no named meaning, say the SVD doesn't name it.
 - Fields marked * differ from the reset value; unmarked fields are at their reset value.
 - If the developer names a pin or field, start with that field's exact value and meaning from the list.
-- Lead with one sentence saying what this register value configures overall.
-- Then up to 5 short "- " bullets on the fields that matter most: fields changed from reset first, then anything unusual (reserved bits set, values not listed in the SVD, conflicting settings).
+- Lead with one sentence saying what this register value configures overall. Do not repeat the developer's question.
+- Groups like "MODER12..MODER6 each = 0b11" are already computed; refer to them exactly as given instead of regrouping fields yourself.
+- Then up to 4 short "- " bullets on the fields that matter most: fields changed from reset first, then anything unusual (reserved bits set, values not listed in the SVD, conflicting settings).
 - If the user describes a problem, connect it to the decoded fields when the facts support a connection, and say plainly when they don't.
 - Plain text only: no headings, no bold, no code blocks. Under 150 words.
 - This is a reading aid, not a substitute for the reference manual; don't claim certainty about board wiring you can't see.`;
@@ -121,7 +122,28 @@ export async function POST(request: Request): Promise<Response> {
     }
     if (attempt.kind === 'ok') {
       workingModel = candidate.id;
-      return json(200, { text: attempt.text, model: attempt.model });
+      let errors = verifyReply(attempt.text, facts);
+      if (errors.length) {
+        // One retry at temperature 0 with the specific misstatements pointed out.
+        const retry = await callModel(
+          candidate.id,
+          candidate.thinkingToggle,
+          `${userText}\n\nA previous answer misstated: ${errors.join('; ')}. Copy every value exactly from the list above.`,
+          deadline,
+          0,
+        );
+        if (retry.kind === 'ok') {
+          errors = verifyReply(retry.text, facts);
+          if (!errors.length) return json(200, { text: retry.text, model: retry.model, verified: true });
+        }
+        console.warn(`[explain] reply failed verification: ${errors.join('; ')}`);
+        return json(200, {
+          text: `${fallbackSummary(facts)}\n\n(The AI explanation was withheld because it misstated a field value.)`,
+          model: 'decoder',
+          verified: true,
+        });
+      }
+      return json(200, { text: attempt.text, model: attempt.model, verified: true });
     }
     if (attempt.kind === 'network') {
       return json(504, { error: attempt.timedOut ? 'The model took too long. Try again.' : 'Could not reach the model API. Try again.' });
@@ -164,7 +186,13 @@ type Attempt =
   | { kind: 'http'; status: number; detail: string }
   | { kind: 'network'; timedOut: boolean };
 
-async function callModel(model: string, thinkingToggle: boolean, userText: string, deadline: number): Promise<Attempt> {
+async function callModel(
+  model: string,
+  thinkingToggle: boolean,
+  userText: string,
+  deadline: number,
+  temperature = 0.3,
+): Promise<Attempt> {
   const body: Record<string, unknown> = {
     model,
     messages: [
@@ -172,7 +200,7 @@ async function callModel(model: string, thinkingToggle: boolean, userText: strin
       { role: 'user', content: userText },
     ],
     // Low temperature: this is a factual summary of given data, not open-ended generation.
-    temperature: 0.3,
+    temperature,
     top_p: 0.9,
     max_tokens: 1024,
     stream: false,
@@ -240,8 +268,89 @@ export function factsAsText(f: Facts, focus: string[]): string {
     lines.push('', 'Fields the developer is asking about:');
     for (const n of focus) lines.push(line(byName.get(n)!));
   }
-  lines.push('', 'All fields (* = differs from reset):');
-  for (const x of f.fields) lines.push(line(x));
+  lines.push('', 'All fields, identical neighbours grouped (* = differs from reset):');
+  for (const g of groupFields(f.fields)) {
+    if (g.length === 1) lines.push(line(g[0]));
+    else {
+      const a = g[0], b = g[g.length - 1];
+      lines.push(
+        `${a.changed_from_reset ? '*' : ' '} ${a.name}..${b.name} (${g.length} fields) each = ${a.value} -> ${a.meaning ?? 'no named value in the SVD'}` +
+          (a.meaning_detail && a.meaning_detail !== a.meaning ? ` (${a.meaning_detail})` : ''),
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Group runs of same-prefix fields with consecutive numbers and identical
+ * value, meaning and reset status (MODER12..MODER6 all Analog). Runs keep the
+ * register's msb-first order; interleaved prefixes (CNF13/MODE13) group per prefix.
+ */
+export function groupFields(fields: Facts['fields']): Facts['fields'][] {
+  const groups: Facts['fields'][] = [];
+  const open = new Map<string, Facts['fields']>();
+  const parts = (n: string) => n.match(/^(.*?)(\d+)$/);
+  for (const x of fields) {
+    const m = parts(x.name);
+    if (!m) {
+      groups.push([x]);
+      continue;
+    }
+    const run = open.get(m[1]);
+    const last = run?.[run.length - 1];
+    const lm = last && parts(last.name);
+    if (
+      run && last && lm && Number(lm[2]) - 1 === Number(m[2]) &&
+      last.value === x.value && last.meaning === x.meaning && !!last.changed_from_reset === !!x.changed_from_reset
+    ) {
+      run.push(x);
+    } else {
+      const g = [x];
+      groups.push(g);
+      open.set(m[1], g);
+    }
+  }
+  return groups;
+}
+
+/**
+ * Check every "FIELD ... = 0bNNN" claim in a reply against the decode. For a
+ * claim like "MODER6 through MODER15 = 0b10", every field named between the
+ * previous "=" and this one must have that value. Returns the misstatements.
+ */
+export function verifyReply(text: string, f: Facts): string[] {
+  const actual = new Map(f.fields.map((x) => [x.name.toUpperCase(), x.value.match(/^0b([01]+)/)?.[1] ?? Number(x.value).toString(2)]));
+  const errors: string[] = [];
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.toUpperCase();
+    let from = 0;
+    for (const m of line.matchAll(/=\s*0B([01]+)/g)) {
+      const clause = line.slice(from, m.index);
+      from = m.index! + m[0].length;
+      const names = [...clause.matchAll(/\b([A-Z][A-Z0-9_]*\d+)\b/g)].map((n) => n[1]).filter((n) => actual.has(n));
+      const claimed = m[1].replace(/^0+(?=.)/, '');
+      for (const n of names) {
+        const real = actual.get(n)!.replace(/^0+(?=.)/, '');
+        if (real !== claimed) errors.push(`${n} is 0b${actual.get(n)}, not 0b${m[1]}`);
+      }
+    }
+  }
+  return errors;
+}
+
+/** Deterministic summary used when the model's reply fails verification. */
+export function fallbackSummary(f: Facts): string {
+  const changed = groupFields(f.fields).filter((g) => g[0].changed_from_reset);
+  const lines = [
+    `${f.register} = ${f.value}${f.reset_value ? ` (reset ${f.reset_value})` : ''}. Fields that differ from reset:`,
+  ];
+  for (const g of changed.slice(0, 8)) {
+    const a = g[0], b = g[g.length - 1];
+    lines.push(`- ${g.length > 1 ? `${a.name}..${b.name}` : a.name} = ${a.value}: ${a.meaning ?? 'no named value in the SVD'}`);
+  }
+  if (!changed.length) lines.push('- none; every field is at its reset value.');
+  if (f.reserved_bits_set) lines.push(`- Reserved bits set: ${f.reserved_bits_set}`);
   return lines.join('\n');
 }
 
@@ -277,5 +386,5 @@ export function stripReasoning(content: string): string {
   let t = content;
   const close = t.lastIndexOf('</think>');
   if (close >= 0) t = t.slice(close + '</think>'.length);
-  return t.replace(/<think>[\s\S]*$/, '').trim();
+  return t.replace(/<think>[\s\S]*$/, '').replace(/\*\*(.+?)\*\*/g, '$1').trim();
 }
