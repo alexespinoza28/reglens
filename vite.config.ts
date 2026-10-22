@@ -33,7 +33,7 @@ function devApi(): Plugin {
 }
 
 export default defineConfig(({ mode }) => {
-  // Make .env values (ANTHROPIC_API_KEY) visible to the dev API handler.
+  // Make .env values (NVIDIA_API_KEY, NVIDIA_MODEL) visible to the dev API handler.
   const env = loadEnv(mode, process.cwd(), '');
   for (const [k, v] of Object.entries(env)) process.env[k] ??= v;
   return { plugins: [react(), devApi()] };

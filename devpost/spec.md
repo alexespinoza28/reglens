@@ -11,7 +11,7 @@ RegLens has three parts.
 
 1. **A converter script** runs once, ahead of time. It reads each chip's SVD file (an XML description of every register, field and named value) and writes a compact JSON file per chip.
 2. **A web page** loads the JSON for the chosen chip. When you paste a value, a small decoding library slices it into fields and looks up each field's named meaning. All of this happens in the browser, instantly, with no server.
-3. **One server function** handles the Explain button. It receives only the chip, register name and value, runs the same decoding library itself, and sends the decoded facts to Claude for a short explanation.
+3. **One server function** handles the Explain button. It receives only the chip, register name and value, runs the same decoding library itself, and sends the decoded facts to NVIDIA's Nemotron model for a short explanation.
 
 Why this shape: decoding has to be exact, so it's plain code over vendor data. The AI is a thin layer on top that can only see what the code produced. The page works fully without the AI.
 
@@ -23,14 +23,14 @@ PRD ref: `prd.md > The Core Journey`.
 2. User types in Register → `RegisterSearch` runs `search()` over an index of `PERIPH_REG` keys → user picks one → hash updates.
 3. User pastes a value → `parseValue()` normalizes it → `decode()` slices fields, matches enum values, compares with reset, finds set reserved bits.
 4. `BitfieldStrip` draws the figure; `FieldTable` lists fields. Clicking a bit or choosing a named value rewrites the value → step 3 reruns.
-5. Explain → `ExplainPanel` POSTs `{chip, register, value, question?}` to `/api/explain` → the function loads the chip JSON from disk, re-runs `decode()`, builds `decodeToFacts()` JSON, calls Claude → returns `{text}` → panel shows it.
+5. Explain → `ExplainPanel` POSTs `{chip, register, value, question?}` to `/api/explain` → the function loads the chip JSON from disk, re-runs `decode()`, builds `decodeToFacts()` JSON, calls Nemotron → returns `{text}` → panel shows it.
 
 ## Stack
 
 - **TypeScript + React 19 + Vite 6** — fast single-page app with no framework server. Docs: https://react.dev, https://vite.dev
 - **fast-xml-parser 5.11.2** (build-time only) — parses SVD XML. https://github.com/NaturalIntelligence/fast-xml-parser
-- **@anthropic-ai/sdk 0.132.1** — Explain call. https://github.com/anthropics/anthropic-sdk-typescript
-- **Model: Claude Opus 5.5 (`claude-opus-5-5`)** at `effort: "low"` — short factual summaries; low effort keeps it fast and cheap. Server-side refusal fallback enabled (`fallbacks: "default"`).
+- **NVIDIA API catalog (build.nvidia.com)** — Explain call over its OpenAI-compatible REST endpoint using plain `fetch`, no SDK. https://build.nvidia.com
+- **Model: NVIDIA Nemotron 3 Super (`nvidia/nemotron-3-super-120b-a12b`)** with reasoning off (`chat_template_kwargs.enable_thinking: false`) and NVIDIA's recommended sampling (temperature 1.0, top_p 0.95). Overridable with `NVIDIA_MODEL`. Chosen because the API is free for development, which keeps the public demo at zero cost.
 - **Node ≥ 22.18** — runs the converter's TypeScript directly (native type stripping).
 - **Data: stm32-rs patched SVDs** — ST's raw SVDs name no field values; the community-patched files add them. https://github.com/stm32-rs/stm32-rs
 
@@ -38,7 +38,7 @@ PRD ref: `prd.md > The Core Journey`.
 
 - Browser app plus one Vercel Node function (`api/explain.ts`). `vercel.json` bundles `public/svd/**` with the function.
 - Local: `npm install`, `npm run dev`, open http://localhost:5173. The Vite dev server also serves `/api/explain` through a small plugin, so local matches production.
-- `ANTHROPIC_API_KEY` in `.env` (local) or Vercel project env vars (production). Without it, everything except Explain works.
+- `NVIDIA_API_KEY` (free, from build.nvidia.com) in `.env` (local) or Vercel project env vars (production). Without it, everything except Explain works.
 - Regenerating data: `npm run svd` (reads `data/svd/*.svd`, writes `public/svd/`).
 - Demo recording: the deployed URL on desktop; start from `#stm32f407/GPIOA_MODER/0xABFFF3FF`.
 
@@ -65,7 +65,7 @@ PRD ref: `prd.md > Register lookup`.
 PRD ref: `prd.md > Screens and Layout`, `prd.md > Exploring a fix`.
 
 ### Explain function (`api/explain.ts`)
-Validates input with strict patterns, loads chip JSON from disk, re-decodes, sends decoded facts plus an optional ≤ 200-character question (framed as a description, not instructions). Maps SDK error classes to clear user messages.
+Validates input with strict patterns, loads chip JSON from disk, re-decodes, sends decoded facts plus an optional ≤ 200-character question (framed as a description, not instructions). Strips any `<think>` reasoning block from the reply and maps HTTP errors (bad key, used-up credits, rate limit, timeout) to clear user messages.
 PRD ref: `prd.md > Explain`.
 
 ## Data Model
@@ -90,13 +90,13 @@ reglens/
 │   └── index.css             # theme tokens and layout
 ├── vite.config.ts            # React plugin + dev /api/explain middleware
 ├── vercel.json               # bundles chip JSON into the function
-├── .env.example              # ANTHROPIC_API_KEY (name only)
+├── .env.example              # NVIDIA_API_KEY, NVIDIA_MODEL (names only)
 └── LICENSE                   # MIT
 ```
 
 ## External Services and Dependencies
 
-- **Anthropic Messages API** via `client.beta.messages.create` with `model: "claude-opus-5-5"`, `max_tokens: 8000`, `output_config: {effort: "low"}`, `betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"`, a fixed system prompt, and one user message holding the decoded JSON. Response: text blocks joined. Key: `ANTHROPIC_API_KEY`. Pricing $4 / $20 per million input/output tokens; a typical call is roughly 1.5k in and a few hundred out, about two cents. Docs: https://platform.claude.com/docs
+- **NVIDIA API catalog chat completions**: `POST https://integrate.api.nvidia.com/v1/chat/completions` with `Authorization: Bearer $NVIDIA_API_KEY`, body `{model, messages: [system, user], temperature: 1.0, top_p: 0.95, max_tokens: 1024, chat_template_kwargs: {enable_thinking: false}}`. Response: `choices[0].message.content`. Free for development under NVIDIA's API Trial Terms; rate limits and credit amounts are set per account. Docs: https://docs.api.nvidia.com
 - **Vercel** free tier hosting. No other services.
 
 ## Important Failure Modes
@@ -114,7 +114,7 @@ reglens/
 ## Decisions and Open Issues
 
 - Data source: switched from ST's raw SVDs to stm32-rs patched SVDs after finding the raw files have zero named values. Tradeoff: community patches, not ST originals; credited in the README and footer.
-- Model: Claude Opus 5.5 at low effort, with refusal fallback on.
+- Model: switched from Claude Opus 5.5 to NVIDIA Nemotron 3 Super on Oct 22 so the public demo costs nothing. Tradeoff: free-tier rate limits, and the hosted API was not tested before the switch because no key was available.
 - The skill pack was not used. These three documents were written directly from the project drafts.
-- Open: abuse protection on `/api/explain` is input validation only. A public demo could run up API cost; add a spending limit on the key in the Anthropic console before sharing widely.
+- Open: abuse protection on `/api/explain` is input validation only. With the free NVIDIA key the risk is the free quota being used up, not money.
 - Open: confirm phone layout on a real device.
