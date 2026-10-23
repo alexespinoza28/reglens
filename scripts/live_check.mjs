@@ -16,7 +16,7 @@ const log = (name, ok, detail) => { (tally[name] ??= []).push(ok); console.log(`
 for (let i = 0; i < runs; i++) {
   if (which !== 'propose') for (const ex of DOCTOR_EXAMPLES) {
     const { status, ms, body: b } = await post('/api/explain', { chip: ex.chip, dump: ex.dump, question: ex.question, hseHz: HSE[ex.chip] });
-    log(`explain ${ex.id}`, status === 200 && b.model !== 'decoder', `${status} ${b.model ?? b.error} ${ms}ms${b.rejected ? ` rejected=${JSON.stringify(b.rejected)}` : ''}`);
+    log(`explain ${ex.id}`, status === 200 && b.model !== 'decoder', `${status} ${b.model ?? b.error} ${ms}ms timings=${JSON.stringify((b.timings ?? []).map((t) => `${t.outcome}:${t.ms}`))}${b.rejected ? ` rejected=${JSON.stringify(b.rejected)}` : ''}`);
     if (verbose) console.log('   ' + String(b.text).replace(/\n/g, ' | '));
   }
   if (which !== 'explain') for (const [chip, text] of [
@@ -26,7 +26,7 @@ for (let i = 0; i < runs; i++) {
   ]) {
     const { status, ms, body: b } = await post('/api/propose', { chip, request: text });
     const v = b.verification;
-    log(`propose "${text}"`, status === 200 && !!v?.verified, `${status} attempts=${b.attempts} ${ms}ms ${v ? v.checks.filter((c) => c.status === 'fail').map((c) => c.text).join(' | ') : b.error}`);
+    log(`propose "${text}"`, status === 200 && !!v?.verified, `${status} attempts=${b.attempts} ${ms}ms added=${JSON.stringify(b.proposal?.added ?? [])} timings=${JSON.stringify((b.timings ?? []).map((t) => `${t.outcome}:${t.ms}`))} ${v ? v.checks.filter((c) => c.status === 'fail').map((c) => c.text).join(' | ') : b.error}`);
     if (verbose || !v?.verified) console.log(`   writes=${JSON.stringify(b.proposal?.writes)} c=${JSON.stringify(b.proposal?.c)} notes=${b.proposal?.notes ?? ''}`);
   }
 }
