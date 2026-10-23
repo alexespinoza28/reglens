@@ -1,0 +1,161 @@
+// Alternate-function pin table for common debug signals. Not in the SVD: these
+// rows were entered by hand from each datasheet's "Alternate function mapping"
+// table. Only common signals are listed; a pin or signal that isn't here gets
+// no AF claim from RegLens.
+
+export interface AfRow {
+  pin: string; // "PA2"
+  port: string; // "GPIOA"
+  n: number; // 2
+  signal: string; // "USART2_TX"
+  /** AF number on F4/H7. F103 has fixed default pins and no AF number. */
+  af?: number;
+}
+
+export interface AfTable {
+  source: string;
+  rows: AfRow[];
+  /** F103: pin functions are fixed, remappable only through AFIO_MAPR. */
+  fixed: boolean;
+}
+
+function parse(spec: string): AfRow[] {
+  const rows: AfRow[] = [];
+  for (const line of spec.trim().split('\n')) {
+    const [pin, rest] = line.trim().split(/\s+/, 2);
+    const m = pin.match(/^P([A-K])(\d+)$/)!;
+    for (const item of rest.split(',')) {
+      const [signal, af] = item.split(':');
+      rows.push({ pin, port: `GPIO${m[1]}`, n: Number(m[2]), signal, af: af === undefined ? undefined : Number(af) });
+    }
+  }
+  return rows;
+}
+
+const F407 = `
+PA0 TIM2_CH1:1,TIM5_CH1:2,USART2_CTS:7,UART4_TX:8
+PA1 TIM2_CH2:1,TIM5_CH2:2,USART2_RTS:7,UART4_RX:8
+PA2 TIM2_CH3:1,TIM5_CH3:2,TIM9_CH1:3,USART2_TX:7
+PA3 TIM2_CH4:1,TIM5_CH4:2,TIM9_CH2:3,USART2_RX:7
+PA5 TIM2_CH1:1,TIM8_CH1N:3,SPI1_SCK:5
+PA6 TIM3_CH1:2,SPI1_MISO:5,TIM13_CH1:9
+PA7 TIM1_CH1N:1,TIM3_CH2:2,TIM8_CH1N:3,SPI1_MOSI:5,TIM14_CH1:9
+PA8 TIM1_CH1:1,I2C3_SCL:4
+PA9 TIM1_CH2:1,USART1_TX:7
+PA10 TIM1_CH3:1,USART1_RX:7
+PA11 TIM1_CH4:1
+PA15 TIM2_CH1:1,SPI1_NSS:5,SPI3_NSS:6
+PB3 TIM2_CH2:1,SPI1_SCK:5,SPI3_SCK:6
+PB4 TIM3_CH1:2,SPI1_MISO:5,SPI3_MISO:6
+PB5 TIM3_CH2:2,SPI1_MOSI:5,SPI3_MOSI:6
+PB6 TIM4_CH1:2,I2C1_SCL:4,USART1_TX:7
+PB7 TIM4_CH2:2,I2C1_SDA:4,USART1_RX:7
+PB8 TIM4_CH3:2,TIM10_CH1:3,I2C1_SCL:4
+PB9 TIM4_CH4:2,TIM11_CH1:3,I2C1_SDA:4
+PB10 TIM2_CH3:1,I2C2_SCL:4,SPI2_SCK:5,USART3_TX:7
+PB11 TIM2_CH4:1,I2C2_SDA:4,USART3_RX:7
+PC6 TIM3_CH1:2,TIM8_CH1:3,USART6_TX:8
+PC7 TIM3_CH2:2,TIM8_CH2:3,USART6_RX:8
+PC10 SPI3_SCK:6,USART3_TX:7,UART4_TX:8
+PC11 SPI3_MISO:6,USART3_RX:7,UART4_RX:8
+PD5 USART2_TX:7
+PD6 USART2_RX:7
+PD8 USART3_TX:7
+PD9 USART3_RX:7
+PD12 TIM4_CH1:2
+PD13 TIM4_CH2:2
+PD14 TIM4_CH3:2
+PD15 TIM4_CH4:2
+PE9 TIM1_CH1:1
+PE11 TIM1_CH2:1
+PE13 TIM1_CH3:1
+PE14 TIM1_CH4:1`;
+
+const F411 = `
+PA0 TIM2_CH1:1,TIM5_CH1:2,USART2_CTS:7
+PA1 TIM2_CH2:1,TIM5_CH2:2,USART2_RTS:7
+PA2 TIM2_CH3:1,TIM5_CH3:2,TIM9_CH1:3,USART2_TX:7
+PA3 TIM2_CH4:1,TIM5_CH4:2,TIM9_CH2:3,USART2_RX:7
+PA5 TIM2_CH1:1,SPI1_SCK:5
+PA6 TIM3_CH1:2,SPI1_MISO:5
+PA7 TIM1_CH1N:1,TIM3_CH2:2,SPI1_MOSI:5
+PA8 TIM1_CH1:1,I2C3_SCL:4
+PA9 TIM1_CH2:1,USART1_TX:7
+PA10 TIM1_CH3:1,USART1_RX:7
+PA11 TIM1_CH4:1,USART6_TX:8
+PA12 USART6_RX:8
+PA15 TIM2_CH1:1,SPI1_NSS:5,SPI3_NSS:6,USART1_TX:7
+PB3 TIM2_CH2:1,SPI1_SCK:5,SPI3_SCK:6,USART1_RX:7
+PB4 TIM3_CH1:2,SPI1_MISO:5,SPI3_MISO:6
+PB5 TIM3_CH2:2,SPI1_MOSI:5,SPI3_MOSI:6
+PB6 TIM4_CH1:2,I2C1_SCL:4,USART1_TX:7
+PB7 TIM4_CH2:2,I2C1_SDA:4,USART1_RX:7
+PB8 TIM4_CH3:2,TIM10_CH1:3,I2C1_SCL:4
+PB9 TIM4_CH4:2,TIM11_CH1:3,I2C1_SDA:4
+PB10 TIM2_CH3:1,I2C2_SCL:4,SPI2_SCK:5
+PC6 TIM3_CH1:2,USART6_TX:8
+PC7 TIM3_CH2:2,USART6_RX:8`;
+
+const H743 = `
+PA0 TIM2_CH1:1,TIM5_CH1:2,USART2_CTS:7,UART4_TX:8
+PA1 TIM2_CH2:1,TIM5_CH2:2,UART4_RX:8
+PA2 TIM2_CH3:1,TIM5_CH3:2,USART2_TX:7
+PA3 TIM2_CH4:1,TIM5_CH4:2,USART2_RX:7
+PA5 TIM2_CH1:1,TIM8_CH1N:3,SPI1_SCK:5
+PA6 TIM3_CH1:2,SPI1_MISO:5
+PA7 TIM1_CH1N:1,TIM3_CH2:2,TIM8_CH1N:3,SPI1_MOSI:5
+PA8 TIM1_CH1:1
+PA9 TIM1_CH2:1,USART1_TX:7
+PA10 TIM1_CH3:1,USART1_RX:7
+PB0 TIM1_CH2N:1,TIM3_CH3:2,TIM8_CH2N:3
+PB6 TIM4_CH1:2,I2C1_SCL:4,USART1_TX:7
+PB7 TIM4_CH2:2,I2C1_SDA:4,USART1_RX:7
+PB8 TIM4_CH3:2,I2C1_SCL:4
+PB9 TIM4_CH4:2,I2C1_SDA:4
+PC6 TIM3_CH1:2,TIM8_CH1:3,USART6_TX:7
+PC7 TIM3_CH2:2,TIM8_CH2:3,USART6_RX:7
+PD8 USART3_TX:7
+PD9 USART3_RX:7
+PD12 TIM4_CH1:2
+PD13 TIM4_CH2:2
+PD14 TIM4_CH3:2
+PD15 TIM4_CH4:2
+PE9 TIM1_CH1:1
+PE11 TIM1_CH2:1
+PE13 TIM1_CH3:1
+PE14 TIM1_CH4:1`;
+
+// F103 default (no remap) pins, RM0008 "Alternate function I/O and debug configuration".
+const F103 = `
+PA0 TIM2_CH1
+PA1 TIM2_CH2
+PA2 TIM2_CH3,USART2_TX
+PA3 TIM2_CH4,USART2_RX
+PA5 SPI1_SCK
+PA6 TIM3_CH1,SPI1_MISO
+PA7 TIM3_CH2,SPI1_MOSI
+PA8 TIM1_CH1
+PA9 TIM1_CH2,USART1_TX
+PA10 TIM1_CH3,USART1_RX
+PA11 TIM1_CH4
+PB0 TIM3_CH3
+PB1 TIM3_CH4
+PB6 TIM4_CH1,I2C1_SCL
+PB7 TIM4_CH2,I2C1_SDA
+PB8 TIM4_CH3
+PB9 TIM4_CH4
+PB10 USART3_TX,I2C2_SCL
+PB11 USART3_RX,I2C2_SDA
+PB13 SPI2_SCK
+PB14 SPI2_MISO
+PB15 SPI2_MOSI`;
+
+export const AF_TABLES: Record<string, AfTable> = {
+  stm32f407: { source: 'STM32F407 datasheet DS8626, alternate function mapping', rows: parse(F407), fixed: false },
+  stm32f411: { source: 'STM32F411xC/E datasheet DS10314, alternate function mapping', rows: parse(F411), fixed: false },
+  stm32h743: { source: 'STM32H743 datasheet DS12110, alternate function mapping', rows: parse(H743), fixed: false },
+  stm32f103: { source: 'RM0008 default (no remap) pinout', rows: parse(F103), fixed: true },
+};
+
+/** Signals that drive the pin (need an AF output); the rest are inputs. */
+export const isOutputSignal = (signal: string) => /_(TX|CH\d|SCK|MOSI|SCL|SDA|NSS)$/.test(signal);

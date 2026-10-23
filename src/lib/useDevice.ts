@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ChipIndexEntry, DeviceJson } from './types';
+import type { ChipIndexEntry, DeviceJson } from './types.js';
 
 const cache = new Map<string, Promise<DeviceJson>>();
 

@@ -1,7 +1,7 @@
 // Register search: "GPIOA_MODER", "gpioa->moder", "rcc ahb1enr", "MODER", or an
 // absolute address like "0x40020000".
 
-import type { DeviceJson, PeripheralJson, RegisterJson } from './types';
+import type { DeviceJson, PeripheralJson, RegisterJson } from './types.js';
 
 export interface RegisterHit {
   key: string; // "GPIOA_MODER"

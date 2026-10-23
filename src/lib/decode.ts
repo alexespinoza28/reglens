@@ -1,7 +1,7 @@
 // Deterministic register decoding. Pure functions, shared by the browser UI and
 // the /api/explain endpoint so the AI only ever sees what this code computed.
 
-import type { DeviceJson, EnumValue, FieldJson, PeripheralJson, RegisterJson } from './types';
+import type { DeviceJson, EnumValue, FieldJson, PeripheralJson, RegisterJson } from './types.js';
 
 export interface DecodedField {
   field: FieldJson;
@@ -132,6 +132,22 @@ export function lookup(
   const p = device.peripherals.find((x) => x.name === periphName);
   const r = p?.registers.find((x) => x.name === regName);
   return p && r ? { peripheral: p, register: r } : undefined;
+}
+
+/**
+ * Find a register by its "PERIPH_REG" key. Peripheral names can contain "_"
+ * (OTG_FS_DEVICE), so every split point is tried, shortest peripheral first.
+ */
+export function lookupKey(
+  device: DeviceJson,
+  key: string,
+): { peripheral: PeripheralJson; register: RegisterJson } | undefined {
+  const parts = key.split('_');
+  for (let i = 1; i < parts.length; i++) {
+    const h = lookup(device, parts.slice(0, i).join('_'), parts.slice(i).join('_'));
+    if (h) return h;
+  }
+  return undefined;
 }
 
 /** Compact, model-friendly JSON of a decode. Only facts from the SVD and the value. */
