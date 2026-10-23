@@ -973,3 +973,9 @@ textarea {
     border-bottom: 1px solid var(--line);
   }
 }
+
+.added {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}

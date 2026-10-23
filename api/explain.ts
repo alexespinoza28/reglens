@@ -141,7 +141,7 @@ async function explainDump(device: DeviceJson, dumpText: string, body: Record<st
   const first = await chat(DOCTOR_SYSTEM, userText);
   if (!first.ok) return first.response;
   let errors = verifyDoctorReply(first.text, dump, dx, opts);
-  if (!errors.length) return json(200, { text: first.text, model: first.model, verified: true });
+  if (!errors.length) return json(200, { text: first.text, model: first.model, verified: true, timings: first.timings });
   const rejected = [...errors];
   const retry = await retrySame(
     first,
@@ -150,7 +150,7 @@ async function explainDump(device: DeviceJson, dumpText: string, body: Record<st
   );
   if (retry) {
     errors = verifyDoctorReply(retry, dump, dx, opts);
-    if (!errors.length) return json(200, { text: retry, model: first.model, verified: true, rejected });
+    if (!errors.length) return json(200, { text: retry, model: first.model, verified: true, rejected, timings: first.timings });
     rejected.push(...errors);
   }
   console.warn(`[explain] doctor reply failed verification: ${errors.join('; ')}`);
@@ -160,6 +160,7 @@ async function explainDump(device: DeviceJson, dumpText: string, body: Record<st
     verified: true,
     // The claims the checker refused, so a withheld reply can be diagnosed. Decoder facts only, nothing secret.
     rejected: [...new Set(rejected)],
+    timings: first.timings,
   });
 }
 

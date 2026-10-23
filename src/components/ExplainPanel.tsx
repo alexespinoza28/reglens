@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { CLIENT_TIMEOUT_MS, timeoutMessage, useElapsed } from '../lib/useElapsed';
 
 interface Props {
   title: string;
@@ -21,6 +22,7 @@ type State =
 export function ExplainPanel({ title, note, body, inputKey, question: external, placeholder }: Props) {
   const [own, setOwn] = useState('');
   const [state, setState] = useState<State>({ status: 'idle' });
+  const elapsed = useElapsed(state.status === 'loading');
   const question = (external ?? own).trim();
   const key = `${inputKey}/${question}`;
 
@@ -31,12 +33,13 @@ export function ExplainPanel({ title, note, body, inputKey, question: external, 
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body(question)),
+        signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS),
       });
       const res = (await r.json().catch(() => ({}))) as { text?: string; error?: string; model?: string };
       if (!r.ok || !res.text) throw new Error(res.error ?? `Request failed (HTTP ${r.status})`);
       setState({ status: 'done', text: res.text, forKey: key, model: res.model });
     } catch (e) {
-      setState({ status: 'error', error: e instanceof Error ? e.message : String(e), forKey: key });
+      setState({ status: 'error', error: timeoutMessage(e) ?? (e instanceof Error ? e.message : String(e)), forKey: key });
     }
   };
 
@@ -64,7 +67,7 @@ export function ExplainPanel({ title, note, body, inputKey, question: external, 
           />
         )}
         <button type="submit" className="primary" disabled={state.status === 'loading'}>
-          {state.status === 'loading' ? 'Explaining…' : 'Explain'}
+          {state.status === 'loading' ? `Explaining… ${elapsed} s` : 'Explain'}
         </button>
       </form>
       {state.status === 'done' && (

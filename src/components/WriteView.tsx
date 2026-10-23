@@ -7,6 +7,7 @@ import { bin, hex } from '../lib/decode';
 import { WRITE_EXAMPLES } from '../lib/examples';
 import { verifyProposal, type Proposal, type Verification } from '../lib/propose';
 import { decodePayload, encodePayload } from '../lib/share';
+import { CLIENT_TIMEOUT_MS, timeoutMessage, useElapsed } from '../lib/useElapsed';
 import type { ChipIndexEntry, DeviceJson } from '../lib/types';
 
 interface Props {
@@ -29,6 +30,7 @@ export function WriteView({ device, chip, payload, onPayload, onOpenRegister }: 
   const [request, setRequest] = useState(() => decodePayload<{ r: string }>(payload).r ?? '');
   const [state, setState] = useState<State>({ status: 'idle' });
   const [copied, setCopied] = useState(false);
+  const elapsed = useElapsed(state.status === 'loading');
   const chipId = chip?.id ?? '';
   const key = `${chipId}/${request.trim()}`;
 
@@ -53,12 +55,13 @@ export function WriteView({ device, chip, payload, onPayload, onOpenRegister }: 
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ chip: chipId, request: req }),
+        signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS),
       });
       const res = (await r.json().catch(() => ({}))) as { proposal?: Proposal; error?: string; model?: string; attempts?: number };
       if (!r.ok || !res.proposal) throw new Error(res.error ?? `Request failed (HTTP ${r.status})`);
       setState({ status: 'done', proposal: res.proposal, request: req, forKey: key, model: res.model, attempts: res.attempts });
     } catch (e) {
-      setState({ status: 'error', error: e instanceof Error ? e.message : String(e), forKey: key });
+      setState({ status: 'error', error: timeoutMessage(e) ?? (e instanceof Error ? e.message : String(e)), forKey: key });
     }
   };
 
@@ -80,7 +83,7 @@ export function WriteView({ device, chip, payload, onPayload, onOpenRegister }: 
             <input value={request} maxLength={300} placeholder="e.g. PA5 push-pull output, low speed, no pull" onChange={(e) => setRequest(e.target.value)} />
           </label>
           <button type="submit" className="primary self-end" disabled={state.status === 'loading' || !request.trim()}>
-            {state.status === 'loading' ? 'Proposing…' : 'Propose'}
+            {state.status === 'loading' ? `Proposing… ${elapsed} s` : 'Propose'}
           </button>
         </form>
         {examples.length > 0 && (
@@ -94,12 +97,18 @@ export function WriteView({ device, chip, payload, onPayload, onOpenRegister }: 
           </div>
         )}
         <p className="dim small">
-          The AI (NVIDIA Nemotron) maps your words to field values from the chip's real register list. RegLens does the
-          arithmetic itself (BRR, PSC, ARR, CCR), decodes every value against the SVD, checks it against your words and
-          numbers, and generates the C from the field values. Only a proposal that passes every check is marked verified.
+          The AI (NVIDIA Nemotron) interprets your request and drafts field values from the chip's real register list.
+          RegLens does the arithmetic (BRR, PSC, ARR, CCR), fills in fields your words pin down that the draft left out
+          (marked “added by RegLens”), writes the C, and checks everything against the SVD and your words. Only a proposal
+          that passes every check is marked verified.
         </p>
       </section>
 
+      {state.status === 'loading' && (
+        <div className="notice small">
+          {elapsed < 4 ? 'Sending your request and the chip’s register list to the AI…' : 'The AI is drafting field values; RegLens will then compute, generate the C and verify. Usually 5–15 s, at most about 45 s.'}
+        </div>
+      )}
       {state.status === 'error' && <div className="notice error">{state.error}</div>}
 
       {state.status === 'done' && verification && (
@@ -162,7 +171,7 @@ export function WriteView({ device, chip, payload, onPayload, onOpenRegister }: 
                           {f.field.width > 1 && f.field.width <= 4 ? `0b${bin(f.value, f.field.width)}` : f.value}
                         </td>
                         <td>{f.svdMeaning ?? <span className="dim">no named value</span>}</td>
-                        <td className="dim">{f.claimed ?? '—'}</td>
+                        <td className="dim">{f.added ? <span className="added">added by RegLens</span> : (f.claimed ?? '—')}</td>
                       </tr>
                     ))}
                   </tbody>

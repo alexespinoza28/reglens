@@ -25,7 +25,11 @@ const CANDIDATE_MODELS: Candidate[] = [
   { id: 'nvidia/nemotron-nano-3-30b-a3b', thinkingToggle: true },
   { id: 'nvidia/llama-3.1-nemotron-70b-instruct', thinkingToggle: false },
 ];
-export const TOTAL_BUDGET_MS = 50_000;
+// Vercel's limit is 60 s (vercel.json maxDuration). Keep the whole request under ~45 s:
+// no single model call may take more than 20 s, and a retry is skipped when it can't finish.
+export const TOTAL_BUDGET_MS = 45_000;
+const PER_CALL_MS = 20_000;
+const MIN_RETRY_MS = 8_000;
 let workingModel: string | undefined;
 
 export function json(status: number, body: unknown): Response {
@@ -78,6 +82,7 @@ export async function callModel(
   userText: string,
   deadline: number,
   temperature = 0.3,
+  maxTokens = 1024,
 ): Promise<Attempt> {
   const body: Record<string, unknown> = {
     model,
@@ -88,7 +93,7 @@ export async function callModel(
     // Low temperature: factual summaries and register plans, not open-ended text.
     temperature,
     top_p: 0.9,
-    max_tokens: 1024,
+    max_tokens: maxTokens,
     stream: false,
   };
   // No reasoning trace needed; skip it for speed.
@@ -104,7 +109,7 @@ export async function callModel(
         accept: 'application/json',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(Math.max(1_000, deadline - Date.now())),
+      signal: AbortSignal.timeout(Math.max(1_000, Math.min(PER_CALL_MS, deadline - Date.now()))),
     });
   } catch (e) {
     return { kind: 'network', timedOut: e instanceof DOMException && e.name === 'TimeoutError' };
@@ -120,28 +125,42 @@ export async function callModel(
 }
 
 export type ChatResult =
-  | { ok: true; text: string; model: string; candidate: Candidate; deadline: number }
+  | { ok: true; text: string; model: string; candidate: Candidate; deadline: number; maxTokens: number; timings: Timing[] }
   | { ok: false; response: Response };
+
+/** One model call, for the response's `timings` (diagnosing slow requests). */
+export interface Timing {
+  model: string;
+  ms: number;
+  outcome: string;
+}
 
 /**
  * Ask the first model this key can reach. Errors come back as ready-made
  * JSON responses with messages a user can act on.
  */
-export async function chat(system: string, userText: string, temperature = 0.3): Promise<ChatResult> {
+export async function chat(system: string, userText: string, temperature = 0.3, maxTokens = 1024): Promise<ChatResult> {
   const tried: string[] = [];
+  const timings: Timing[] = [];
+  const timed = async (c: Candidate, toggle: boolean) => {
+    const t = Date.now();
+    const a = await callModel(c.id, toggle, system, userText, deadline, temperature, maxTokens);
+    timings.push({ model: c.id, ms: Date.now() - t, outcome: a.kind === 'http' ? `HTTP ${a.status}` : a.kind === 'network' ? (a.timedOut ? 'timeout' : 'network') : a.kind });
+    return a;
+  };
   let lastDetail = '';
   const deadline = Date.now() + TOTAL_BUDGET_MS;
   for (const candidate of modelOrder()) {
     if (deadline - Date.now() < 3_000) break;
     tried.push(candidate.id);
-    let attempt = await callModel(candidate.id, candidate.thinkingToggle, system, userText, deadline, temperature);
+    let attempt = await timed(candidate, candidate.thinkingToggle);
     // Some deployments reject chat_template_kwargs; retry that model once without it.
     if (attempt.kind === 'http' && attempt.status === 400 && candidate.thinkingToggle) {
-      attempt = await callModel(candidate.id, false, system, userText, deadline, temperature);
+      attempt = await timed(candidate, false);
     }
     if (attempt.kind === 'ok') {
       workingModel = candidate.id;
-      return { ok: true, text: attempt.text, model: attempt.model, candidate, deadline };
+      return { ok: true, text: attempt.text, model: attempt.model, candidate, deadline, maxTokens, timings };
     }
     if (attempt.kind === 'network') {
       return { ok: false, response: json(504, { error: attempt.timedOut ? 'The model took too long. Try again.' : 'Could not reach the model API. Try again.' }) };
@@ -169,9 +188,18 @@ export async function chat(system: string, userText: string, temperature = 0.3):
   };
 }
 
-/** A second call on the model that just answered (for a verification retry). */
+/**
+ * A second call on the model that just answered (for a verification retry).
+ * Skipped when too little of the time budget is left for it to finish.
+ */
 export async function retrySame(first: Extract<ChatResult, { ok: true }>, system: string, userText: string): Promise<string | undefined> {
-  const r = await callModel(first.candidate.id, first.candidate.thinkingToggle, system, userText, first.deadline, 0);
+  if (first.deadline - Date.now() < MIN_RETRY_MS) {
+    first.timings.push({ model: first.candidate.id, ms: 0, outcome: 'retry skipped: time budget' });
+    return undefined;
+  }
+  const t = Date.now();
+  const r = await callModel(first.candidate.id, first.candidate.thinkingToggle, system, userText, first.deadline, 0, first.maxTokens);
+  first.timings.push({ model: first.candidate.id, ms: Date.now() - t, outcome: `retry ${r.kind === 'http' ? `HTTP ${r.status}` : r.kind}` });
   return r.kind === 'ok' ? r.text : undefined;
 }
 
