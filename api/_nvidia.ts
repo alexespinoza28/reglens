@@ -162,8 +162,17 @@ export async function chat(system: string, userText: string, temperature = 0.3, 
       workingModel = candidate.id;
       return { ok: true, text: attempt.text, model: attempt.model, candidate, deadline, maxTokens, timings };
     }
+    // A stalled call is usually transient (seen live: one 20 s hang in 9 Write runs),
+    // so try the same model once more while the budget still allows a full answer.
+    if (attempt.kind === 'network' && attempt.timedOut && deadline - Date.now() >= MIN_RETRY_MS) {
+      attempt = await timed(candidate, candidate.thinkingToggle);
+      if (attempt.kind === 'ok') {
+        workingModel = candidate.id;
+        return { ok: true, text: attempt.text, model: attempt.model, candidate, deadline, maxTokens, timings };
+      }
+    }
     if (attempt.kind === 'network') {
-      return { ok: false, response: json(504, { error: attempt.timedOut ? 'The model took too long. Try again.' : 'Could not reach the model API. Try again.' }) };
+      return { ok: false, response: json(504, { error: attempt.timedOut ? 'The model took too long. Try again.' : 'Could not reach the model API. Try again.', timings }) };
     }
     if (attempt.kind === 'empty') {
       lastDetail = 'empty reply';

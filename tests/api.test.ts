@@ -76,6 +76,22 @@ describe('/api/propose', () => {
     expect(body.proposal.added).toEqual(['RCC_AHB1ENR.GPIOAEN = 1']);
     expect(calls[0].user).toMatch(/MODER5 bits \[11:10\] values: 0=Input, 1=Output/);
   });
+  it('retries the same model once after a stalled call', async () => {
+    const models: string[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { model: string };
+      models.push(body.model);
+      if (models.length === 1) throw new DOMException('The operation timed out.', 'TimeoutError');
+      return new Response(JSON.stringify({ model: body.model, choices: [{ message: { content: GOOD } }] }), { status: 200 });
+    });
+    const res = await post(propose, { chip: 'stm32f411', request: 'PA5 push-pull output, no pull' });
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.verification.verified).toBe(true);
+    expect(models).toHaveLength(2);
+    expect(models[1]).toBe(models[0]);
+    expect(body.timings.map((t: { outcome: string }) => t.outcome)).toEqual(['timeout', 'ok']);
+  });
   it('retries once with the failed checks, and returns the corrected proposal', async () => {
     const calls = stubModel([WRONG, GOOD]);
     const body = await (await post(propose, { chip: 'stm32f411', request: 'PA5 push-pull output, no pull' })).json();
