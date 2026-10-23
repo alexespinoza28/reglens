@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/explain.ts": { "includeFiles": "public/svd/**", "maxDuration": 60 }
+    "api/explain.ts": { "includeFiles": "public/svd/**", "maxDuration": 60 },
+    "api/propose.ts": { "includeFiles": "public/svd/**", "maxDuration": 60 }
   }
 }
