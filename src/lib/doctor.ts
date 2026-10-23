@@ -111,6 +111,13 @@ function afState(view: DumpView, port: string, n: number): Cite | undefined {
   return f ? cite(r, f.field.name) : undefined;
 }
 
+/** F103 MODE = 01/10/11 is an output at up to 10/2/50 MHz (RM0008). */
+const f1Speed = (s: PinState) => {
+  const mode = s.cites.find((c) => /^MODE\d+$/.test(c.field));
+  const mhz = mode ? [0, 10, 2, 50][mode.value] : 0;
+  return mhz ? ` at up to ${mhz} MHz (${mode!.field} = 0b${mode!.value.toString(2).padStart(2, '0')})` : '';
+};
+
 const modeText = (s: PinState) =>
   s.mode === 'af' ? 'alternate function' : s.mode === 'analog' ? 'analog' : s.mode === 'output' ? 'general-purpose output' : 'input';
 
@@ -212,7 +219,7 @@ function rulePinMux(device: DeviceJson, view: DumpView, fam: Family, targets: st
             rule: 'pin-mux',
             severity: 'error',
             title: `${gp.r.pin} is a general-purpose output, not ${signal}`,
-            detail: `${gp.r.pin} is set as an output with CNF${gp.r.n} = 0b${gp.s.cnf!.toString(2).padStart(2, '0')} (general-purpose ${gp.s.cnf ? 'open-drain' : 'push-pull'}), so the GPIO's ODR drives the pin and ${p} can't. ${signal} needs alternate-function ${odrFor(gp.r.n)} on ${gp.r.pin} (${table.source}; RegLens assumes no AFIO remap).`,
+            detail: `${gp.r.pin} is set as an output${f1Speed(gp.s)} with CNF${gp.r.n} = 0b${gp.s.cnf!.toString(2).padStart(2, '0')} (general-purpose ${gp.s.cnf ? 'open-drain' : 'push-pull'}), so the GPIO's ODR drives the pin and ${p} can't. ${signal} needs alternate-function ${odrFor(gp.r.n)} on ${gp.r.pin} (${table.source}; RegLens assumes no AFIO remap).`,
             cites: gp.s.cites,
           });
         } else if (out) {
@@ -701,7 +708,8 @@ export function findingsSummary(dx: Diagnosis): string {
 
 const UNIT_KIND: Record<string, 'hz' | 'baud' | 'pct'> = { hz: 'hz', khz: 'hz', mhz: 'hz', baud: 'baud', bps: 'baud', bd: 'baud', '%': 'pct' };
 const UNIT_SCALE: Record<string, number> = { hz: 1, khz: 1e3, mhz: 1e6 };
-const NUM_UNIT = /(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|baud|bps|Bd|%)/gi;
+// The number must start a token: "USART2 baud" is a name, not 2 baud; "8.6875" is not 6875.
+const NUM_UNIT = /(?<![\w.,])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|baud|bps|Bd|%)(?![\w])/gi;
 
 /**
  * Check a doctor summary: every REGISTER.FIELD = value and FIELD = value claim
@@ -782,6 +790,17 @@ export function verifyDoctorReply(text: string, dump: MappedDump, dx: Diagnosis,
     for (const v of [n.freqHz, n.impliedHz, n.clockHz]) if (v) allowed.hz.push(v);
     for (const v of [n.baud, n.target]) if (v) allowed.baud.push(v);
     for (const v of [n.errorPct, n.dutyPct]) if (v !== undefined) allowed.pct.push(Math.abs(v), 100 - Math.abs(v));
+  }
+  // A frequency named after a clock must be that clock: "APB1 runs at 50 MHz" is wrong on a 36 MHz APB1.
+  const CLOCK_OF: Record<string, keyof Pick<Clocks, 'sysclk' | 'hclk' | 'pclk1' | 'pclk2' | 'tim1' | 'tim2'>> = {
+    SYSCLK: 'sysclk', HCLK: 'hclk', AHB: 'hclk', APB1: 'pclk1', PCLK1: 'pclk1', APB2: 'pclk2', PCLK2: 'pclk2',
+  };
+  for (const m of text.matchAll(/\b(SYSCLK|HCLK|AHB|APB1|PCLK1|APB2|PCLK2)\b(\s+timers?)?[^.\n\d]{0,24}?(?<![\w.,])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(MHz|kHz|Hz)\b/gi)) {
+    let k = CLOCK_OF[m[1].toUpperCase()];
+    if (m[2]) k = k === 'pclk1' ? 'tim1' : k === 'pclk2' ? 'tim2' : k;
+    const real = c[k].hz;
+    const v = Number(m[3].replace(/,/g, '')) * (UNIT_SCALE[m[4].toLowerCase()] ?? 1);
+    if (real !== undefined && Math.abs(real - v) > real * 0.005) errors.push(`${m[1]}${m[2] ?? ''} is ${formatMHz(real)}, not ${m[3]} ${m[4]}`);
   }
   for (const m of text.matchAll(NUM_UNIT)) {
     const unit = m[2].toLowerCase();

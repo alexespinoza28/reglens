@@ -171,6 +171,19 @@ describe('verifyDoctorReply', () => {
   it('accepts dividers quoted by meaning and any number the facts state', () => {
     expect(verifyDoctorReply('PLLP = 2, PPRE1 = 2, so APB1 is 50 MHz from a 200 MHz VCO; at HSI 16 MHz this BRR gives 115,108 baud (-0.08%).', m, dx, o)).toEqual([]);
   });
+  it('does not read peripheral names as numbers ("USART2 baud rate" is not 2 baud)', () => {
+    expect(verifyDoctorReply('The USART2 baud rate is 359,712 baud; USART1 baud rate would be 115,200 baud.', m, dx, o)).toEqual([]);
+    expect(verifyDoctorReply('USARTDIV = 8.6875, 1 stop bit, about x3 too fast.', m, dx, o)).toEqual([]);
+    expect(verifyDoctorReply('It runs at 230,400 baud.', m, dx, o)).toEqual(["230,400 baud isn't a number RegLens computed"]);
+  });
+  it('a frequency named after a clock must be that clock', () => {
+    const bp = DOCTOR_EXAMPLES.find((e) => e.id === 'bluepill-uart')!;
+    const r = run(bp.chip, bp.dump, { question: bp.question });
+    const ob = { question: bp.question, hseHz: 8e6 };
+    // 50 MHz is a stated fact here (PA9 output speed), but APB1 is 36 MHz.
+    expect(verifyDoctorReply('PA9 is a 50 MHz push-pull output; APB2 runs at 72 MHz and APB1 timers at 72 MHz.', r.m, r.dx, ob)).toEqual([]);
+    expect(verifyDoctorReply('APB1 runs at 50 MHz.', r.m, r.dx, ob)).toEqual(['APB1 is 36 MHz, not 50 MHz']);
+  });
   it('fallback summary lists findings and computed numbers', () => {
     const s = findingsSummary(dx);
     expect(s).toMatch(/RegLens found 1 issue/);
