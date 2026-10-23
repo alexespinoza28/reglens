@@ -1,98 +1,85 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useChipIndex, useDevice } from './lib/useDevice';
-import { decode, hex, lookup, parseValue } from './lib/decode';
-import { RegisterSearch } from './components/RegisterSearch';
-import { BitfieldStrip } from './components/BitfieldStrip';
-import { FieldTable } from './components/FieldTable';
-import { ExplainPanel } from './components/ExplainPanel';
+import { DecodeView } from './components/DecodeView';
+import { DoctorView } from './components/DoctorView';
+import { WriteView } from './components/WriteView';
 
-// URL hash holds the whole state so a decode can be shared:
-//   #stm32f407/GPIOA_MODER/0xABFFFFFF
+// The URL hash holds the whole state so any view can be shared:
+//   #stm32f407/GPIOA_MODER/0xABFFFFFF        decode one register (original format)
+//   #doctor/stm32f411/<base64url JSON>       peripheral doctor
+//   #write/stm32f411/<base64url JSON>        write a config
+type Mode = 'decode' | 'doctor' | 'write';
+
 interface Route {
+  mode: Mode;
   chip: string;
   reg: string;
   value: string;
+  payload: string;
 }
 
-const DEFAULT: Route = { chip: 'stm32f407', reg: 'GPIOA_MODER', value: '0xABFFFFFF' };
+const DEFAULT: Route = { mode: 'decode', chip: 'stm32f407', reg: 'GPIOA_MODER', value: '0xABFFFFFF', payload: '' };
 
 function readHash(): Route {
-  const [chip, reg, value] = decodeURIComponent(location.hash.slice(1)).split('/');
-  return chip ? { chip, reg: reg ?? '', value: value ?? '' } : DEFAULT;
+  const raw = location.hash.slice(1);
+  const m = raw.match(/^(doctor|write)\/([a-z0-9]+)(?:\/([A-Za-z0-9_-]*))?$/);
+  if (m) return { mode: m[1] as Mode, chip: m[2], reg: '', value: '', payload: m[3] ?? '' };
+  if (raw === 'doctor' || raw === 'write') return { ...DEFAULT, mode: raw, chip: 'stm32f411', payload: '' };
+  const [chip, reg, value] = decodeURIComponent(raw).split('/');
+  return chip ? { mode: 'decode', chip, reg: reg ?? '', value: value ?? '', payload: '' } : DEFAULT;
 }
 
-function splitKey(key: string): [string, string] {
-  const i = key.indexOf('_');
-  return i < 0 ? [key, ''] : [key.slice(0, i), key.slice(i + 1)];
+function writeHash(r: Route): string {
+  if (r.mode === 'decode') return `#${r.chip}/${r.reg}/${r.value}`;
+  return `#${r.mode}/${r.chip}${r.payload ? `/${r.payload}` : ''}`;
 }
+
+const TABS: { mode: Mode; label: string }[] = [
+  { mode: 'decode', label: 'Decode a register' },
+  { mode: 'doctor', label: 'Peripheral doctor' },
+  { mode: 'write', label: 'Write a config' },
+];
 
 export default function App() {
   const { chips, error: indexError } = useChipIndex();
   const [route, setRoute] = useState<Route>(readHash);
-  const [valueText, setValueText] = useState(route.value);
-  const [hovered, setHovered] = useState<string | null>(null);
-  const [onlyChanged, setOnlyChanged] = useState(false);
+  // Bumped on back/forward so each view re-reads its inputs from the URL.
+  const [epoch, setEpoch] = useState(0);
 
   const chip = chips?.find((c) => c.id === route.chip) ?? chips?.[0];
   const { device, error: deviceError, loading } = useDevice(chip);
 
-  // Keep the hash in sync; respond to back/forward.
   useEffect(() => {
-    const h = `#${route.chip}/${route.reg}/${route.value}`;
+    const h = writeHash(route);
     if (location.hash !== h) history.replaceState(null, '', h);
   }, [route]);
   useEffect(() => {
     const on = () => {
-      const r = readHash();
-      setRoute(r);
-      setValueText(r.value);
+      setRoute(readHash());
+      setEpoch((e) => e + 1);
     };
     addEventListener('hashchange', on);
     return () => removeEventListener('hashchange', on);
   }, []);
 
-  // A register can name a peripheral containing "_" (e.g. OTG_FS_DEVICE), so
-  // try every split point rather than just the first underscore.
-  const hit = useMemo(() => {
-    if (!device || !route.reg) return undefined;
-    const parts = route.reg.split('_');
-    for (let i = 1; i < parts.length; i++) {
-      const h = lookup(device, parts.slice(0, i).join('_'), parts.slice(i).join('_'));
-      if (h) return h;
-    }
-    const [p, r] = splitKey(route.reg);
-    return lookup(device, p, r);
-  }, [device, route.reg]);
-
-  const size = hit?.register.size ?? 32;
-  const parsed = parseValue(valueText, size);
-  const value = parsed.ok ? parsed.value : null;
-  const decoded = useMemo(
-    () => (device && hit && value !== null ? decode(device, hit.peripheral, hit.register, value) : undefined),
-    [device, hit, value],
-  );
-
-  const setValue = (v: number) => {
-    const h = hex(v, size);
-    setValueText(h);
-    setRoute((r) => ({ ...r, value: h }));
+  const setPayload = useCallback((payload: string) => setRoute((r) => (r.payload === payload ? r : { ...r, payload })), []);
+  const openRegister = useCallback((reg: string, value: string) => {
+    setRoute((r) => ({ ...r, mode: 'decode', reg, value, payload: '' }));
+    setEpoch((e) => e + 1);
+    scrollTo({ top: 0 });
+  }, []);
+  const switchMode = (mode: Mode) => {
+    if (mode === route.mode) return;
+    setRoute((r) => ({
+      ...r,
+      mode,
+      payload: '',
+      reg: mode === 'decode' ? r.reg || DEFAULT.reg : r.reg,
+      value: mode === 'decode' ? r.value || DEFAULT.value : r.value,
+    }));
+    setEpoch((e) => e + 1);
   };
 
-  const toggleBit = (bit: number) => {
-    if (!decoded) return;
-    const mask = 2 ** bit;
-    const isSet = Math.floor(decoded.value / mask) % 2 === 1;
-    setValue(isSet ? decoded.value - mask : decoded.value + mask);
-  };
-
-  const setField = (lsb: number, width: number, v: number) => {
-    if (!decoded) return;
-    const unit = 2 ** lsb;
-    const old = Math.floor(decoded.value / unit) % 2 ** width;
-    setValue(decoded.value + (v - old) * unit);
-  };
-
-  const changedCount = decoded?.fields.filter((f) => f.changedFromReset).length ?? 0;
   const error = indexError ?? deviceError;
 
   return (
@@ -110,13 +97,29 @@ export default function App() {
           </svg>
           <div>
             <h1>RegLens</h1>
-            <p className="tagline">Paste a register value from your debugger. See every bit, named from ST's own SVD.</p>
+            <p className="tagline">
+              A peripheral doctor for STM32: paste registers from your debugger, see every bit named from the SVD, and
+              find the setting that contradicts another.
+            </p>
           </div>
         </div>
       </header>
 
-      <section className="controls">
-        <label className="ctl">
+      <nav className="modebar">
+        <div className="tabs" role="tablist">
+          {TABS.map((t) => (
+            <button
+              key={t.mode}
+              role="tab"
+              aria-selected={route.mode === t.mode}
+              className={`tab ${route.mode === t.mode ? 'active' : ''}`}
+              onClick={() => switchMode(t.mode)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <label className="ctl chip-ctl">
           <span>Chip</span>
           <select
             value={chip?.id ?? ''}
@@ -130,109 +133,48 @@ export default function App() {
             ))}
           </select>
         </label>
-        <label className="ctl grow" htmlFor="reg">
-          <span>Register</span>
-          <RegisterSearch
-            device={device}
-            selectedKey={hit ? `${hit.peripheral.name}_${hit.register.name}` : route.reg}
-            onSelect={(h) => setRoute((r) => ({ ...r, reg: h.key }))}
-          />
-        </label>
-        <label className="ctl value">
-          <span>Value</span>
-          <input
-            className={`mono ${parsed.ok || !valueText ? '' : 'bad'}`}
-            value={valueText}
-            spellCheck={false}
-            placeholder="0xABFFFFFF or $1 = 0x..."
-            onChange={(e) => setValueText(e.target.value)}
-            onBlur={() => parsed.ok && setRoute((r) => ({ ...r, value: hex(parsed.value, size) }))}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && parsed.ok) setValue(parsed.value);
-            }}
-          />
-        </label>
-      </section>
+      </nav>
 
       {error && <div className="notice error">Couldn't load register data: {error}</div>}
       {loading && <div className="notice">Loading {chip?.label} register map…</div>}
-      {device && route.reg && !hit && (
-        <div className="notice">
-          No register called <span className="mono">{route.reg}</span> on {chip?.label}. Try searching above.
-        </div>
+
+      {route.mode === 'decode' && (
+        <DecodeView
+          key={`d${epoch}`}
+          device={device}
+          chip={chip}
+          reg={route.reg}
+          value={route.value}
+          onChange={(p) => setRoute((r) => ({ ...r, ...p }))}
+        />
       )}
-      {hit && !parsed.ok && valueText && <div className="notice error">{parsed.error}</div>}
-
-      {decoded && device && chip && hit && (
-        <>
-          <section className="summary">
-            <div>
-              <div className="regname mono">
-                {hit.peripheral.name}_{hit.register.name}
-              </div>
-              <div className="dim">{hit.register.description}</div>
-            </div>
-            <dl className="facts mono">
-              <div>
-                <dt>Address</dt>
-                <dd>{hex(decoded.address)}</dd>
-              </div>
-              <div>
-                <dt>Value</dt>
-                <dd>{hex(decoded.value, size)}</dd>
-              </div>
-              {hit.register.reset !== undefined && (
-                <div>
-                  <dt>Reset</dt>
-                  <dd>
-                    <button className="link" onClick={() => setValue(hit.register.reset!)} title="Load the reset value">
-                      {hex(hit.register.reset, size)}
-                    </button>
-                  </dd>
-                </div>
-              )}
-              {hit.register.access && (
-                <div>
-                  <dt>Access</dt>
-                  <dd>{hit.register.access}</dd>
-                </div>
-              )}
-            </dl>
-          </section>
-
-          {decoded.reservedSet !== 0 && (
-            <div className="notice warn">
-              Reserved bits are set ({hex(decoded.reservedSet, size)}). Real hardware usually reads these as 0, so
-              check that you copied the right register or value.
-            </div>
-          )}
-
-          <BitfieldStrip decoded={decoded} hovered={hovered} onHover={setHovered} onToggleBit={toggleBit} />
-          <p className="hint dim small">Click any bit to flip it. Fields that differ from reset are marked.</p>
-
-          <div className="table-head">
-            <h2>Fields</h2>
-            <label className="small">
-              <input type="checkbox" checked={onlyChanged} onChange={(e) => setOnlyChanged(e.target.checked)} /> Only
-              changed from reset ({changedCount})
-            </label>
-          </div>
-          <FieldTable
-            device={device}
-            decoded={decoded}
-            hovered={hovered}
-            onHover={setHovered}
-            onSetField={setField}
-            onlyChanged={onlyChanged}
-          />
-
-          <ExplainPanel chip={chip.id} registerKey={`${hit.peripheral.name}_${hit.register.name}`} valueHex={hex(decoded.value, size)} />
-        </>
+      {route.mode === 'doctor' && (
+        <DoctorView
+          key={`o${epoch}`}
+          device={device}
+          chip={chip}
+          payload={route.payload}
+          onPayload={setPayload}
+          onChip={(c) => setRoute((r) => ({ ...r, chip: c }))}
+          onOpenRegister={openRegister}
+        />
+      )}
+      {route.mode === 'write' && (
+        <WriteView
+          key={`w${epoch}`}
+          device={device}
+          chip={chip}
+          payload={route.payload}
+          onPayload={setPayload}
+          onOpenRegister={openRegister}
+        />
       )}
 
       <footer className="foot small dim">
         Register data: <a href="https://github.com/stm32-rs/stm32-rs">stm32-rs</a> patched SVDs, based on ST's CMSIS-SVD
-        files. Decoding is deterministic; only the Explain panel uses AI. Not affiliated with STMicroelectronics.
+        files. Decoding, the doctor's rules and the clock math are deterministic; only Explain and Write call an AI, and
+        RegLens checks what it says. Not affiliated with STMicroelectronics. Always confirm critical settings against the
+        reference manual.
       </footer>
     </div>
   );

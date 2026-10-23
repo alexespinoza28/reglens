@@ -1,21 +1,28 @@
 import { useState } from 'react';
 
 interface Props {
-  chip: string;
-  registerKey: string;
-  valueHex: string;
+  title: string;
+  note: string;
+  /** JSON body for POST /api/explain, given the question. */
+  body: (question: string) => Record<string, unknown>;
+  /** Changes whenever the input being explained changes; marks old results stale. */
+  inputKey: string;
+  /** When set, the question comes from elsewhere on the page and no input box is shown. */
+  question?: string;
+  placeholder?: string;
 }
 
 type State =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'done'; text: string; forKey: string }
+  | { status: 'done'; text: string; forKey: string; model?: string }
   | { status: 'error'; error: string; forKey: string };
 
-export function ExplainPanel({ chip, registerKey, valueHex }: Props) {
-  const [question, setQuestion] = useState('');
+export function ExplainPanel({ title, note, body, inputKey, question: external, placeholder }: Props) {
+  const [own, setOwn] = useState('');
   const [state, setState] = useState<State>({ status: 'idle' });
-  const key = `${chip}/${registerKey}/${valueHex}/${question.trim()}`;
+  const question = (external ?? own).trim();
+  const key = `${inputKey}/${question}`;
 
   const run = async () => {
     setState({ status: 'loading' });
@@ -23,11 +30,11 @@ export function ExplainPanel({ chip, registerKey, valueHex }: Props) {
       const r = await fetch('/api/explain', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chip, register: registerKey, value: valueHex, question: question.trim() || undefined }),
+        body: JSON.stringify(body(question)),
       });
-      const body = (await r.json().catch(() => ({}))) as { text?: string; error?: string };
-      if (!r.ok || !body.text) throw new Error(body.error ?? `Request failed (HTTP ${r.status})`);
-      setState({ status: 'done', text: body.text, forKey: key });
+      const res = (await r.json().catch(() => ({}))) as { text?: string; error?: string; model?: string };
+      if (!r.ok || !res.text) throw new Error(res.error ?? `Request failed (HTTP ${r.status})`);
+      setState({ status: 'done', text: res.text, forKey: key, model: res.model });
     } catch (e) {
       setState({ status: 'error', error: e instanceof Error ? e.message : String(e), forKey: key });
     }
@@ -38,8 +45,8 @@ export function ExplainPanel({ chip, registerKey, valueHex }: Props) {
   return (
     <section className="explain">
       <div className="explain-head">
-        <h2>Explain this value</h2>
-        <span className="dim small">AI summary of the decoded fields only. It cannot add bits the SVD doesn't define.</span>
+        <h2>{title}</h2>
+        <span className="dim small">{note}</span>
       </div>
       <form
         className="explain-form"
@@ -48,22 +55,23 @@ export function ExplainPanel({ chip, registerKey, valueHex }: Props) {
           void run();
         }}
       >
-        <input
-          placeholder="Optional: what are you debugging? e.g. “PA5 LED won't toggle”"
-          maxLength={200}
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-        />
+        {external === undefined && (
+          <input
+            placeholder={placeholder ?? 'Optional: what are you debugging?'}
+            maxLength={200}
+            value={own}
+            onChange={(e) => setOwn(e.target.value)}
+          />
+        )}
         <button type="submit" className="primary" disabled={state.status === 'loading'}>
           {state.status === 'loading' ? 'Explaining…' : 'Explain'}
         </button>
       </form>
       {state.status === 'done' && (
         <div className={`explain-out ${stale ? 'stale' : ''}`}>
-          {stale && <div className="small dim">Value changed since this explanation. Run Explain again.</div>}
-          {state.text.split('\n').map((line, i) =>
-            line.trim() ? <p key={i}>{line}</p> : null,
-          )}
+          {stale && <div className="small dim">The input changed since this explanation. Run Explain again.</div>}
+          {state.text.split('\n').map((line, i) => (line.trim() ? <p key={i}>{line}</p> : null))}
+          {state.model === 'decoder' && <div className="small dim">Shown from the decoder: the AI reply failed RegLens's checks.</div>}
         </div>
       )}
       {state.status === 'error' && <div className="explain-out error">{state.error}</div>}
