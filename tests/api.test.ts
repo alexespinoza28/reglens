@@ -72,7 +72,8 @@ describe('/api/propose', () => {
     expect(body.verification.verified).toBe(true);
     expect(body.attempts).toBe(1);
     expect(body.proposal.cSource).toBe('reglens');
-    expect(body.proposal.c[0]).toBe('GPIOA->MODER = (GPIOA->MODER & ~0xC00U) | 0x400U;');
+    expect(body.proposal.c.slice(0, 2)).toEqual(['RCC->AHB1ENR = (RCC->AHB1ENR & ~0x1U) | 0x1U;', 'GPIOA->MODER = (GPIOA->MODER & ~0xC00U) | 0x400U;']);
+    expect(body.proposal.added).toEqual(['RCC_AHB1ENR.GPIOAEN = 1']);
     expect(calls[0].user).toMatch(/MODER5 bits \[11:10\] values: 0=Input, 1=Output/);
   });
   it('retries once with the failed checks, and returns the corrected proposal', async () => {

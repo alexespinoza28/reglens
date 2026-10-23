@@ -181,7 +181,7 @@ describe('proposalContext', () => {
 });
 
 describe('UART configs must turn the UART on', () => {
-  it('fails when UE, TE or RE is missing (the live failure of Oct 22)', () => {
+  it('adds omitted TE/RE (the live failure of Oct 22) and marks them added', () => {
     const p: Proposal = {
       writes: [
         { register: 'RCC->APB1ENR', fields: [{ name: 'USART2EN', value: 1, meaning: 'Enabled' }] },
@@ -190,10 +190,24 @@ describe('UART configs must turn the UART on', () => {
       ],
       c: [],
     };
-    const v = verifyProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', finalizeProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', p));
-    expect(fails(v)).toEqual([
-      'The transmitter must be on (TE = 1) unless the request says RX only, but USART2_CR1.TE is not set.',
-      'The receiver must be on (RE = 1) unless the request says TX only, but USART2_CR1.RE is not set.',
+    const f = finalizeProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', p);
+    expect(f.added).toEqual(['USART2_CR1.TE = 1', 'USART2_CR1.RE = 1']);
+    const v = verifyProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', f);
+    expect(fails(v)).toEqual([]);
+    expect(v.checks.find((c) => c.status === 'note' && /Added by RegLens/.test(c.text))?.text).toMatch(/USART2_CR1.TE = 1, USART2_CR1.RE = 1/);
+    expect(v.results.find((r) => r.key === 'USART2_CR1')?.fields.filter((x) => x.added).map((x) => x.field.name)).toEqual(['TE', 'RE']);
+  });
+  it('a value the AI set against the request still fails (TE = 0)', () => {
+    const p: Proposal = {
+      writes: [
+        { register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+        { register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }, { name: 'TE', value: 0 }, { name: 'RE', value: 1 }] },
+      ],
+      c: [],
+    };
+    const req = 'USART2 115200 baud at 50 MHz APB1';
+    expect(fails(verifyProposal(f411(), req, finalizeProposal(f411(), req, p)))).toEqual([
+      'The transmitter must be on (TE = 1) unless the request says RX only, but USART2_CR1.TE is 0.',
     ]);
   });
   it('TX only needs no RE', () => {
@@ -274,10 +288,82 @@ describe('generateC and notes', () => {
   });
   it('drops a note that claims fields the writes do not set', () => {
     const p: Proposal = { writes: [{ register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }] }], c: [], notes: 'Enable USART2 with TE and RE, transmitter enabled' };
-    expect(unbackedNoteClaims(f411(), 'USART2 115200 baud', p)).toEqual(['TE', 'RE', 'transmitter enabled (TE)']);
-    const f = finalizeProposal(f411(), 'USART2 115200 baud', p);
+    expect(unbackedNoteClaims(f411(), 'USART2 enable', p)).toEqual(['TE', 'RE', 'transmitter enabled (TE)']);
+    const f = finalizeProposal(f411(), 'USART2 enable', p);
     expect(f.notes).toBeUndefined();
     expect(f.notesDropped).toMatch(/mentioned TE, RE/);
     expect(f.cSource).toBe('reglens');
+  });
+});
+
+describe('merge step: the three live failures of Oct 22, replayed', () => {
+  const run = (req: string, writes: Proposal['writes']) => {
+    const f = finalizeProposal(f411(), req, { writes, c: [] });
+    return { f, v: verifyProposal(f411(), req, f) };
+  };
+
+  it('TIM2 PWM without CCR1: RegLens adds CCR1 = 250 and it verifies', () => {
+    const { f, v } = run('TIM2 channel 1 PWM at 1 kHz, 25% duty, timer clock 100 MHz', [
+      { register: 'RCC_APB1ENR', fields: [{ name: 'TIM2EN', value: 1, meaning: 'Enabled' }] },
+      { register: 'TIM2_PSC', fields: [{ name: 'PSC', value: 99 }] },
+      { register: 'TIM2_ARR', fields: [{ name: 'ARR', value: 999 }] },
+      { register: 'TIM2_CCMR1_Output', fields: [{ name: 'OC1M', value: 6, meaning: 'PwmMode1' }] },
+      { register: 'TIM2_CCER', fields: [{ name: 'CC1E', value: 1, meaning: 'Enabled' }] },
+      { register: 'TIM2_CR1', fields: [{ name: 'CEN', value: 1, meaning: 'Enabled' }] },
+    ]);
+    expect(f.added).toEqual(['TIM2_CCR1.CCR = 250']);
+    expect(fails(v)).toEqual([]);
+  });
+
+  it('CCR follows the AI\'s own ARR when it chose another valid split', () => {
+    const { f, v } = run('TIM2 channel 1 PWM at 1 kHz, 25% duty, timer clock 100 MHz', [
+      { register: 'TIM2_PSC', fields: [{ name: 'PSC', value: 1 }] },
+      { register: 'TIM2_ARR', fields: [{ name: 'ARR', value: 49999 }] },
+      { register: 'TIM2_CCMR1_Output', fields: [{ name: 'OC1M', value: 6 }] },
+      { register: 'TIM2_CCER', fields: [{ name: 'CC1E', value: 1 }] },
+      { register: 'TIM2_CR1', fields: [{ name: 'CEN', value: 1 }] },
+    ]);
+    expect(f.added).toContain('TIM2_CCR1.CCR = 12500');
+    expect(fails(v)).toEqual([]);
+  });
+
+  it('USART2 with an extra empty USART2_CR2: the empty register is dropped and it verifies', () => {
+    const { f, v } = run('USART2 115200 baud at 50 MHz APB1', [
+      { register: 'RCC_APB1ENR', fields: [{ name: 'USART2EN', value: 1, meaning: 'Enabled' }] },
+      { register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+      { register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }, { name: 'TE', value: 1 }, { name: 'RE', value: 1 }, { name: 'OVER8', value: 0 }] },
+      { register: 'USART2_CR2', fields: [] },
+    ]);
+    expect(f.droppedEmpty).toEqual(['USART2_CR2']);
+    expect(f.added).toBeUndefined();
+    expect(fails(v)).toEqual([]);
+  });
+
+  it('PA5 with only GPIOAEN and MODER5: RegLens adds OT5, PUPDR5 and the 50 MHz speed', () => {
+    const { f, v } = run('PA5 push-pull output, 50 MHz, no pull', [
+      { register: 'RCC_AHB1ENR', fields: [{ name: 'GPIOAEN', value: 1, meaning: 'Enabled' }] },
+      { register: 'GPIOA_MODER', fields: [{ name: 'MODER5', value: 1, meaning: 'Output' }] },
+    ]);
+    expect(f.added).toEqual(['GPIOA_OTYPER.OT5 = 0', 'GPIOA_PUPDR.PUPDR5 = 0', 'GPIOA_OSPEEDR.OSPEEDR5 = 2']);
+    expect(fails(v)).toEqual([]);
+    expect(v.checks.some((c) => c.status === 'pass' && /50 MHz output speed/.test(c.text))).toBe(true);
+  });
+
+  it('a speed the AI got wrong fails', () => {
+    const { v } = run('PA5 push-pull output, 50 MHz, no pull', [
+      { register: 'GPIOA_MODER', fields: [{ name: 'MODER5', value: 1 }] },
+      { register: 'GPIOA_OSPEEDR', fields: [{ name: 'OSPEEDR5', value: 0, meaning: 'LowSpeed' }] },
+    ]);
+    expect(fails(v)).toEqual(['The request asks for 50 MHz output speed (RM0090 speed classes) on PA5, but GPIOA_OSPEEDR.OSPEEDR5 = 0.']);
+  });
+
+  it('H743 speed in MHz is a note, not a guess', () => {
+    const f = finalizeProposal(device('stm32h743'), 'PA5 push-pull output, 50 MHz, no pull', {
+      writes: [{ register: 'GPIOA_MODER', fields: [{ name: 'MODER5', value: 1 }] }],
+      c: [],
+    });
+    const v = verifyProposal(device('stm32h743'), 'PA5 push-pull output, 50 MHz, no pull', f);
+    expect(f.added).not.toContain(expect.stringMatching(/OSPEEDR/));
+    expect(v.checks.some((c) => c.status === 'note' && /not checked/.test(c.text))).toBe(true);
   });
 });

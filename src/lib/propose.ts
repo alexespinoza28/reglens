@@ -20,6 +20,8 @@ export interface ProposedField {
   name: string;
   value: number;
   meaning?: string;
+  /** Derived by RegLens from the request because the AI left it out. */
+  addedBy?: 'reglens';
 }
 
 export interface ProposedWrite {
@@ -36,6 +38,10 @@ export interface Proposal {
   cSource?: 'reglens' | 'model';
   /** Why the model's note was removed, when it claimed settings the writes don't make. */
   notesDropped?: string;
+  /** REGISTER.FIELD = value entries RegLens added from the request. */
+  added?: string[];
+  /** Registers the AI listed with no fields, which RegLens dropped. */
+  droppedEmpty?: string[];
 }
 
 export type CheckStatus = 'pass' | 'fail' | 'note';
@@ -51,7 +57,7 @@ export interface WriteResult {
   /** Register value after the C lines run from the reset value. */
   value: number;
   decoded: DecodedRegister;
-  fields: { field: FieldJson; value: number; svdMeaning?: string; claimed?: string }[];
+  fields: { field: FieldJson; value: number; svdMeaning?: string; claimed?: string; added?: boolean }[];
 }
 
 export interface Verification {
@@ -473,6 +479,8 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
   }
   const meaningFails = checks.some((c) => c.status === 'fail' && /in the SVD, but|not a value the SVD names/.test(c.text));
   if (structuralOk && !meaningFails) pass('Every named value matches the SVD, including the meanings the AI stated.');
+  if (proposal.added?.length) note(`Added by RegLens from your request (the AI left them out): ${proposal.added.join(', ')}.`);
+  if (proposal.droppedEmpty?.length) note(`Dropped registers the AI listed without any fields: ${proposal.droppedEmpty.join(', ')}.`);
 
   const fieldOf = (key: string, name: string) =>
     resolved.find((r) => r.key === key)?.fields.find((x) => x.f.name === name)?.p.value;
@@ -513,9 +521,9 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
         const fname = h?.register.fields.find((f) => f.name === `AFR${n < 8 ? 'L' : 'H'}${n}` || f.name === `AFR${n}`)?.name;
         if (fname) expect(afReg, fname, [it.af], `AF${it.af}`);
       }
-      if (/\b(low|medium|high|very high|fast)\s+speed|\d+\s*MHz/i.test(request) && !it.baud && !it.pwmHz) {
-        note('Output speed is not checked against the request: speed names and limits vary by chip and supply voltage, so compare OSPEEDR with the datasheet.');
-      }
+      const speed = gpioSpeed(device, request);
+      if (speed && 'value' in speed) expect(`${pin.port}_OSPEEDR`, `OSPEEDR${n}`, [speed.value], speed.what);
+      else if (speed) note(speed.note);
     }
   }
 
@@ -662,7 +670,7 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
       register: r.hit.register,
       value,
       decoded: decode(device, r.hit.peripheral, r.hit.register, value),
-      fields: r.fields.map(({ f, p }) => ({ field: f, value: p.value, svdMeaning: findMeaning(device, f, p.value)?.n, claimed: p.meaning })),
+      fields: r.fields.map(({ f, p }) => ({ field: f, value: p.value, svdMeaning: findMeaning(device, f, p.value)?.n, claimed: p.meaning, added: p.addedBy === 'reglens' })),
     });
   }
 
@@ -849,7 +857,8 @@ export function unbackedNoteClaims(device: DeviceJson, request: string, p: Propo
  * What the server does with a model reply before verifying it: C comes from
  * RegLens, and a note claiming settings the writes don't make is dropped.
  */
-export function finalizeProposal(device: DeviceJson, request: string, p: Proposal): Proposal {
+export function finalizeProposal(device: DeviceJson, request: string, raw: Proposal): Proposal {
+  const p = mergeDerived(device, request, raw);
   const out: Proposal = { ...p, c: generateC(device, p.writes), cSource: 'reglens' };
   const claims = unbackedNoteClaims(device, request, p);
   if (claims.length) {
@@ -857,4 +866,108 @@ export function finalizeProposal(device: DeviceJson, request: string, p: Proposa
     out.notesDropped = `The AI's note mentioned ${claims.join(', ')}, which the proposal doesn't set, so RegLens removed it.`;
   }
   return out;
+}
+
+/**
+ * Output speed from the request. Words follow the SVD names (low / medium / fast or
+ * high / very high); MHz figures are mapped only where the reference manual labels
+ * them (F103 MODE: 2/10/50 MHz; F407/F411 OSPEEDR: 2/25/50/100 MHz per RM0090).
+ */
+export function gpioSpeed(device: DeviceJson, request: string): { value: number; what: string } | { note: string } | undefined {
+  const fam = family(device);
+  if (fam === 'f1') return undefined; // F103 speed lives in MODE, checked with the mode
+  const r = request.toLowerCase();
+  if (/very[- ]high[- ]speed|\bvery fast\b/.test(r)) return { value: 3, what: 'very high speed' };
+  if (/\bmedium[- ]speed\b/.test(r)) return { value: 1, what: 'medium speed' };
+  if (/\blow[- ]speed\b|\bslow\b/.test(r)) return { value: 0, what: 'low speed' };
+  if (/\b(high[- ]speed|fast)\b/.test(r)) return { value: 2, what: 'high speed' };
+  const mhz = r.match(/\b(\d+)\s*mhz\b/);
+  if (!mhz || /baud|pwm/.test(r)) return undefined;
+  if (device.id === 'stm32f407' || device.id === 'stm32f411') {
+    const v = ({ 2: 0, 25: 1, 50: 2, 100: 3 } as Record<number, number>)[Number(mhz[1])];
+    if (v !== undefined) return { value: v, what: `${mhz[1]} MHz output speed (RM0090 speed classes)` };
+  }
+  return { note: `Output speed "${mhz[0]}" is not checked: speed limits for this chip depend on supply and load, so compare OSPEEDR with the datasheet.` };
+}
+
+/** GPIO field values the request's words pin down (mode, type, pull, AF, speed) plus the port clock. */
+export function derivedGpioFields(device: DeviceJson, request: string): ComputedField[] {
+  const fam = family(device);
+  const it = parseIntent(request);
+  const out: ComputedField[] = [];
+  const has = (key: string, field: string) => !!lookupKey(device, key)?.register.fields.some((f) => f.name === field);
+  const add = (register: string, field: string, value: number) => {
+    if (has(register, field)) out.push({ register, field, value });
+  };
+  const speed = gpioSpeed(device, request);
+  for (const { port, n } of it.pins) {
+    if (!device.peripherals.some((p) => p.name === port)) continue;
+    if (fam === 'f1') {
+      const cr = `${port}_CR${n < 8 ? 'L' : 'H'}`;
+      if (it.mode === 'output' || it.mode === 'af') {
+        if (it.speedMHz) add(cr, `MODE${n}`, { 2: 2, 10: 1, 50: 3 }[it.speedMHz]!);
+        if (it.otype !== undefined) add(cr, `CNF${n}`, (it.mode === 'af' ? 2 : 0) + it.otype);
+      } else if (it.mode === 'input' || it.mode === 'analog') {
+        add(cr, `MODE${n}`, 0);
+        if (it.mode === 'analog') add(cr, `CNF${n}`, 0);
+        else if (it.pull === 0) add(cr, `CNF${n}`, 1);
+        else if (it.pull !== undefined) add(cr, `CNF${n}`, 2);
+      }
+    } else {
+      if (it.mode) add(`${port}_MODER`, `MODER${n}`, { input: 0, output: 1, af: 2, analog: 3 }[it.mode]);
+      if (it.otype !== undefined) add(`${port}_OTYPER`, `OT${n}`, it.otype);
+      if (it.pull !== undefined) add(`${port}_PUPDR`, `PUPDR${n}`, it.pull);
+      if (it.af !== undefined) {
+        const afReg = `${port}_AFR${n < 8 ? 'L' : 'H'}`;
+        const f = lookupKey(device, afReg)?.register.fields.find((x) => x.name === `AFR${n < 8 ? 'L' : 'H'}${n}` || x.name === `AFR${n}`);
+        if (f) add(afReg, f.name, it.af);
+      }
+      if (speed && 'value' in speed && it.mode !== 'input' && it.mode !== 'analog') add(`${port}_OSPEEDR`, `OSPEEDR${n}`, speed.value);
+    }
+    const en = enableBit(device, port);
+    if (en) add(en.register, en.field, 1);
+  }
+  return out;
+}
+
+/**
+ * Before verification: drop registers the AI listed with no fields, and add every
+ * field value RegLens derived from the request (computed BRR/PSC/ARR/CCR, required
+ * enables, GPIO words) that the AI left out, marked as added. A value the AI set
+ * differently is kept as the AI's, so the verifier's checks still catch it.
+ */
+export function mergeDerived(device: DeviceJson, request: string, p: Proposal): Proposal {
+  const droppedEmpty = p.writes.filter((w) => !w.fields.length).map((w) => w.register);
+  const writes = p.writes.filter((w) => w.fields.length).map((w) => ({ ...w, fields: [...w.fields] }));
+  const keyOf = (name: string) => {
+    const h = resolveRegister(device, name, writes.map((w) => w.register));
+    return h ? `${h.peripheral.name}_${h.register.name}` : undefined;
+  };
+  const valueOf = (reg: string, field: string) =>
+    writes.find((w) => keyOf(w.register) === reg)?.fields.find((f) => f.name.toUpperCase() === field.toUpperCase())?.value;
+  const it = parseIntent(request);
+  const added: string[] = [];
+  for (const d of [...computedPlan(device, request).fields, ...derivedGpioFields(device, request)]) {
+    if (valueOf(d.register, d.field) !== undefined) continue;
+    let value = d.value;
+    // CCR follows the AI's own ARR when it chose a different (still valid) PSC/ARR split.
+    if (/_CCR\d$/.test(d.register) && it.dutyPct !== undefined) {
+      const arr = valueOf(d.register.replace(/_CCR\d$/, '_ARR'), 'ARR');
+      if (arr !== undefined) value = Math.round((it.dutyPct / 100) * (arr + 1));
+    }
+    const hit = lookupKey(device, d.register);
+    const f = hit?.register.fields.find((x) => x.name === d.field);
+    if (!hit || !f) continue;
+    const field: ProposedField = { name: d.field, value, meaning: findMeaning(device, f, value)?.n, addedBy: 'reglens' };
+    const w = writes.find((x) => keyOf(x.register) === d.register);
+    if (w) w.fields.push(field);
+    else writes.push({ register: d.register, fields: [field] });
+    added.push(`${d.register}.${d.field} = ${value}`);
+  }
+  return {
+    ...p,
+    writes,
+    added: added.length ? added : undefined,
+    droppedEmpty: droppedEmpty.length ? droppedEmpty : undefined,
+  };
 }
