@@ -96,7 +96,7 @@ PRD ref: `prd.md > Cross-register findings`, `prd.md > Computed quantities`, `pr
 PRD ref: `prd.md > Write a config`.
 
 ### Page (`src/App.tsx`, `src/components/*`)
-`App` owns the route (mode, chip, mode inputs) mirrored to the URL hash and the tab bar. `DecodeView` is the original single-register screen (`RegisterSearch`, `BitfieldStrip`, `FieldTable`, `ExplainPanel`). `DoctorView` holds the paste box, clock inputs, `Findings`, computed cards and register cards. `WriteView` holds the request box and `ProposalCard`.
+`App` owns the route (mode, chip, mode inputs) mirrored to the URL hash and the tab bar. `DecodeView` is the original single-register screen (`RegisterSearch`, `BitfieldStrip`, `FieldTable`, `ExplainPanel`). `DoctorView` holds the paste box, clock inputs, `Findings`, computed cards and register cards. `WriteView` holds the request box and the proposal card (badge, checks, field tables, C lines).
 PRD ref: `prd.md > Screens and Layout`.
 
 ### Explain function (`api/explain.ts`)
@@ -131,8 +131,8 @@ reglens/
 ├── scripts/svd_to_json.ts    # SVD → JSON converter
 ├── src/
 │   ├── App.tsx               # route state, tabs
-│   ├── components/           # DecodeView, DoctorView, WriteView, Findings, ProposalCard, ...
-│   ├── lib/                  # decode, search, dump, clocks, afmap, doctor, propose, examples
+│   ├── components/           # DecodeView, DoctorView, WriteView, Findings, ExplainPanel, ...
+│   ├── lib/                  # decode, search, dump, clocks, afmap, doctor, propose, cite, share, examples
 │   └── index.css             # theme tokens and layout
 ├── tests/*.test.ts           # Vitest unit tests
 ├── vite.config.ts            # React plugin + dev /api/* middleware
