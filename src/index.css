@@ -950,3 +950,26 @@ textarea {
     font-size: 8px;
   }
 }
+
+.explain-form > .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  /* The clock table is short and narrow: keep it a real table on phones. */
+  table.fields.clocks {
+    display: table;
+  }
+  .fields.clocks tbody {
+    display: table-row-group;
+  }
+  .fields.clocks tr {
+    display: table-row;
+  }
+  .fields.clocks td {
+    display: table-cell;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+}
