@@ -13,7 +13,7 @@
 
 import { bits, decode, findMeaning, hex, lookupKey, type DecodedRegister } from './decode.js';
 import { enableBit, family, type Family } from './clocks.js';
-import { timerPwm, usartBaudF4, usartBaudH7 } from './doctor.js';
+import { brrForF4, timerPwm, usartBaudF4, usartBaudH7 } from './doctor.js';
 import type { DeviceJson, FieldJson, PeripheralJson, RegisterJson } from './types.js';
 
 export interface ProposedField {
@@ -29,8 +29,13 @@ export interface ProposedWrite {
 
 export interface Proposal {
   writes: ProposedWrite[];
+  /** C statements. RegLens generates these from the field writes (see generateC). */
   c: string[];
   notes?: string;
+  /** Set when RegLens wrote `c` itself rather than taking the model's. */
+  cSource?: 'reglens' | 'model';
+  /** Why the model's note was removed, when it claimed settings the writes don't make. */
+  notesDropped?: string;
 }
 
 export type CheckStatus = 'pass' | 'fail' | 'note';
@@ -532,11 +537,25 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
   } else if (it.baud && /USART|UART/i.test(request)) {
     fail(`The request asks for ${it.baud} baud, but the proposal doesn't set BRR.`);
   }
+  // A UART configuration has to turn the UART and its directions on.
+  const uart = uartOf(device, request);
+  if (uart && it.baud) {
+    for (const [field, why] of uartEnables(request)) {
+      const got = fieldOf(`${uart}_CR1`, field);
+      if (got !== 1) fail(`${why}, but ${uart}_CR1.${field} is ${got ?? 'not set'}.`);
+    }
+    if (it.over8 !== undefined && lookupKey(device, `${uart}_CR1`)?.register.fields.some((f) => f.name === 'OVER8')) {
+      const got = fieldOf(`${uart}_CR1`, 'OVER8');
+      if ((got ?? 0) !== it.over8) fail(`The request asks for ${it.over8 ? 8 : 16}x oversampling, but ${uart}_CR1.OVER8 is ${got ?? 'not set (0)'}.`);
+    }
+  }
 
   // PWM frequency and duty at a stated clock.
-  const timer = resolved.find((r) => /^TIM\d+_/.test(r.key))?.hit.peripheral;
-  if (it.pwmHz && timer) {
-    const t = timer.name;
+  const timerName =
+    [...request.toUpperCase().matchAll(/\b(TIM\d+)\b/g)].map((m) => m[1]).find((n) => device.peripherals.some((p) => p.name === n)) ??
+    resolved.find((r) => /^TIM\d+_/.test(r.key))?.hit.peripheral.name;
+  if (it.pwmHz && timerName) {
+    const t = timerName;
     const ch = it.channel ?? 1;
     const reset = (r: string) => lookupKey(device, `${t}_${r}`)?.register.reset ?? 0;
     const psc = fieldOf(`${t}_PSC`, 'PSC') ?? reset('PSC');
@@ -549,7 +568,7 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
     else pass(`${t} channel ${ch} is in PWM mode ${mode === 6 ? 1 : 2}.`);
     const en = fieldOf(`${t}_CCER`, `CC${ch}E`);
     if (en !== 1) fail(`Channel ${ch}'s output isn't enabled: ${t}_CCER.CC${ch}E is ${en ?? 'not set'}.`);
-    if (fieldOf(`${t}_CR1`, 'CEN') !== 1) note(`${t}_CR1.CEN isn't set to 1 in the proposal; the counter must be started separately.`);
+    if (fieldOf(`${t}_CR1`, 'CEN') !== 1) fail(`The counter isn't started: ${t}_CR1.CEN is ${fieldOf(`${t}_CR1`, 'CEN') ?? 'not set'}, so no PWM comes out.`);
     if (!it.clockHz) note('PWM frequency not checked: say the timer clock in the request (for example "timer clock 100 MHz").');
     else {
       const r = timerPwm(it.clockHz, psc, arr, ccr, { mode2: mode === 7 });
@@ -654,4 +673,188 @@ export function verifyProposal(device: DeviceJson, request: string, proposal: Pr
 /** Failed checks, for the model's second attempt. */
 export function failures(v: Verification): string[] {
   return v.checks.filter((c) => c.status === 'fail').map((c) => c.text);
+}
+
+// --- Deterministic help for the model ---------------------------------------------------
+
+function uartOf(device: DeviceJson, request: string): string | undefined {
+  return [...request.toUpperCase().matchAll(/\b((?:LP)?U(?:S)?ART\d+)\b/g)]
+    .map((m) => m[1])
+    .find((n) => device.peripherals.some((p) => p.name === n));
+}
+
+/** CR1 bits a UART configuration needs, with the reason. */
+function uartEnables(request: string): [string, string][] {
+  const txOnly = /\b(tx|transmit)[- ]only\b/i.test(request);
+  const rxOnly = /\b(rx|receive)[- ]only\b/i.test(request);
+  const out: [string, string][] = [['UE', 'A UART configuration must enable the UART (UE = 1)']];
+  if (!rxOnly) out.push(['TE', 'The transmitter must be on (TE = 1) unless the request says RX only']);
+  if (!txOnly) out.push(['RE', 'The receiver must be on (RE = 1) unless the request says TX only']);
+  return out;
+}
+
+/** PSC/ARR for a PWM frequency: prefer ARR + 1 = 1000 (0.1% duty steps), else the finest exact split. */
+export function pscArrFor(ticks: number, maxArr = 65535): { psc: number; arr: number } {
+  const exact = Math.abs(ticks - Math.round(ticks)) < 1e-6;
+  const t = Math.round(ticks);
+  if (exact) {
+    for (const period of [1000, 10000, 100]) {
+      if (t % period === 0 && t / period - 1 <= 65535) return { psc: t / period - 1, arr: period - 1 };
+    }
+    for (let p = 1; p <= 65536; p++) if (t % p === 0 && t / p - 1 <= maxArr) return { psc: p - 1, arr: t / p - 1 };
+  }
+  const p = Math.max(1, Math.ceil(ticks / (maxArr + 1)));
+  return { psc: p - 1, arr: Math.max(1, Math.round(ticks / p)) - 1 };
+}
+
+export interface ComputedField {
+  register: string;
+  field: string;
+  value: number;
+}
+
+/**
+ * Values RegLens works out from the request itself, so the model never does
+ * arithmetic: BRR from baud and clock, PSC/ARR/CCR from PWM frequency, duty and
+ * clock, plus the enable bits those setups need. Returned as prompt lines and as
+ * field values.
+ */
+export function computedPlan(device: DeviceJson, request: string): { lines: string[]; fields: ComputedField[] } {
+  const it = parseIntent(request);
+  const lines: string[] = [];
+  const fields: ComputedField[] = [];
+  const has = (key: string, field: string) => !!lookupKey(device, key)?.register.fields.some((f) => f.name === field);
+  const add = (register: string, field: string, value: number) => {
+    if (has(register, field)) fields.push({ register, field, value });
+  };
+  const uart = uartOf(device, request);
+  if (uart && it.baud) {
+    const over8 = it.over8 ?? 0;
+    if (!it.clockHz) lines.push(`No bus clock in the request, so RegLens can't compute BRR; say it, e.g. "at 50 MHz".`);
+    else if (has(`${uart}_BRR`, 'BRR')) {
+      const div = Math.round(((over8 ? 2 : 1) * it.clockHz) / it.baud);
+      const brr = over8 ? Math.floor(div / 16) * 16 + Math.floor((div % 16) / 2) : div;
+      const real = usartBaudH7(it.clockHz, brr, over8).baud;
+      add(`${uart}_BRR`, 'BRR', brr);
+      lines.push(`${uart}_BRR.BRR = ${brr} gives ${Math.round(real)} baud at ${it.clockHz / 1e6} MHz (${(((real - it.baud) / it.baud) * 100).toFixed(2)}%).`);
+    } else {
+      const brr = brrForF4(it.clockHz, it.baud, over8);
+      const mant = Math.floor(brr / 16);
+      const frac = brr % 16;
+      const real = usartBaudF4(it.clockHz, mant, frac, over8).baud;
+      add(`${uart}_BRR`, 'DIV_Mantissa', mant);
+      add(`${uart}_BRR`, 'DIV_Fraction', frac);
+      lines.push(
+        `${uart}_BRR.DIV_Mantissa = ${mant}, ${uart}_BRR.DIV_Fraction = ${frac} (BRR = ${hex(brr, 16)}) give ${Math.round(real)} baud at ${it.clockHz / 1e6} MHz (${(((real - it.baud) / it.baud) * 100).toFixed(2)}% from ${it.baud}).`,
+      );
+    }
+    for (const [f] of uartEnables(request)) add(`${uart}_CR1`, f, 1);
+    if (has(`${uart}_CR1`, 'OVER8')) add(`${uart}_CR1`, 'OVER8', over8);
+  }
+  const timer = [...request.toUpperCase().matchAll(/\b(TIM\d+)\b/g)].map((m) => m[1]).find((n) => device.peripherals.some((p) => p.name === n));
+  if (timer && it.pwmHz) {
+    const ch = it.channel ?? 1;
+    if (!it.clockHz) lines.push(`No timer clock in the request, so RegLens can't compute PSC and ARR; say it, e.g. "timer clock 100 MHz".`);
+    else {
+      const arrWidth = lookupKey(device, `${timer}_ARR`)?.register.fields.find((f) => f.name === 'ARR')?.width ?? 16;
+      const { psc, arr } = pscArrFor(it.clockHz / it.pwmHz, Math.min(2 ** arrWidth - 1, 65535));
+      add(`${timer}_PSC`, 'PSC', psc);
+      add(`${timer}_ARR`, 'ARR', arr);
+      const ccrKey = `${timer}_CCR${ch}`;
+      const ccrField = lookupKey(device, ccrKey)?.register.fields[0]?.name;
+      let ccrText = '';
+      if (it.dutyPct !== undefined && ccrField) {
+        const ccr = Math.round((it.dutyPct / 100) * (arr + 1));
+        add(ccrKey, ccrField, ccr);
+        ccrText = `, ${ccrKey}.${ccrField} = ${ccr}`;
+      }
+      const r = timerPwm(it.clockHz, psc, arr, fields.find((f) => f.register === ccrKey)?.value ?? 0);
+      lines.push(
+        `${timer}_PSC.PSC = ${psc}, ${timer}_ARR.ARR = ${arr}${ccrText} give ${+r.freqHz.toFixed(3)} Hz${it.dutyPct !== undefined ? ` at ${+r.dutyPct.toFixed(2)}% duty` : ''} with a ${it.clockHz / 1e6} MHz timer clock.`,
+      );
+    }
+    add(`${timer}_CCMR${ch <= 2 ? 1 : 2}_Output`, `OC${ch}M`, 6);
+    add(`${timer}_CCER`, `CC${ch}E`, 1);
+    add(`${timer}_CR1`, 'CEN', 1);
+  }
+  for (const p of new Set([uart, timer].filter((x): x is string => !!x))) {
+    const en = enableBit(device, p);
+    if (en) add(en.register, en.field, 1);
+  }
+  if (fields.length) {
+    lines.push('Field values RegLens computed or requires for this request (use exactly these):');
+    for (const f of fields) lines.push(`  ${f.register}.${f.field} = ${f.value}`);
+  }
+  return { lines, fields };
+}
+
+/**
+ * C for the field writes, generated by RegLens rather than trusted from the
+ * model: one read-modify-write per register (a plain write when the fields
+ * cover the whole register, or the register is write-only). RCC first.
+ */
+export function generateC(device: DeviceJson, writes: ProposedWrite[]): string[] {
+  const keys = writes.map((w) => w.register);
+  const out: { rcc: boolean; line: string }[] = [];
+  for (const w of writes) {
+    const hit = resolveRegister(device, w.register, keys);
+    if (!hit) continue;
+    let mask = 0n;
+    let value = 0n;
+    for (const p of w.fields) {
+      const f = hit.register.fields.find((x) => x.name.toUpperCase() === p.name.toUpperCase());
+      if (!f || p.value < 0 || p.value >= 2 ** f.width) continue;
+      mask |= ((1n << BigInt(f.width)) - 1n) << BigInt(f.lsb);
+      value |= BigInt(p.value) << BigInt(f.lsb);
+    }
+    if (!mask) continue;
+    const full = (1n << BigInt(hit.register.size)) - 1n;
+    let covered = 0n;
+    for (const f of hit.register.fields) covered |= ((1n << BigInt(f.width)) - 1n) << BigInt(f.lsb);
+    const name = cName(hit.peripheral.name, hit.register.name);
+    const hx = (v: bigint) => `0x${v.toString(16).toUpperCase()}U`;
+    const line =
+      hit.register.access === 'write-only' || (mask === covered && covered === full)
+        ? `${name} = ${hx(value)};`
+        : `${name} = (${name} & ~${hx(mask)}) | ${hx(value)};`;
+    out.push({ rcc: hit.peripheral.name === 'RCC', line });
+  }
+  return [...out.filter((x) => x.rcc), ...out.filter((x) => !x.rcc)].map((x) => x.line);
+}
+
+/**
+ * Field names (or TX/RX enable claims) in the model's note that the writes don't
+ * back. A note with any of these is dropped rather than shown.
+ */
+export function unbackedNoteClaims(device: DeviceJson, request: string, p: Proposal): string[] {
+  if (!p.notes) return [];
+  const keys = p.writes.map((w) => w.register);
+  const hits = p.writes.map((w) => resolveRegister(device, w.register, keys)).filter((h): h is Hit => !!h);
+  const set = new Set(p.writes.flatMap((w) => w.fields.map((f) => f.name.toUpperCase())));
+  const known = new Set<string>();
+  for (const h of hits) for (const r of h.peripheral.registers) for (const f of r.fields) known.add(f.name.toUpperCase());
+  const uart = uartOf(device, request);
+  if (uart) for (const r of device.peripherals.find((x) => x.name === uart)?.registers ?? []) for (const f of r.fields) known.add(f.name.toUpperCase());
+  const out = new Set<string>();
+  for (const m of p.notes.matchAll(/\b([A-Za-z][A-Za-z0-9_]{1,})\b/g)) {
+    const t = m[1].toUpperCase();
+    if (known.has(t) && !set.has(t) && /[A-Z]/.test(m[1][0]) && m[1] === m[1].toUpperCase()) out.add(m[1]);
+  }
+  if (/\b(transmitter|tx)\b[^.]*\b(enabled|on)\b/i.test(p.notes) && !set.has('TE')) out.add('transmitter enabled (TE)');
+  if (/\b(receiver|rx)\b[^.]*\b(enabled|on)\b/i.test(p.notes) && !set.has('RE')) out.add('receiver enabled (RE)');
+  return [...out];
+}
+
+/**
+ * What the server does with a model reply before verifying it: C comes from
+ * RegLens, and a note claiming settings the writes don't make is dropped.
+ */
+export function finalizeProposal(device: DeviceJson, request: string, p: Proposal): Proposal {
+  const out: Proposal = { ...p, c: generateC(device, p.writes), cSource: 'reglens' };
+  const claims = unbackedNoteClaims(device, request, p);
+  if (claims.length) {
+    out.notes = undefined;
+    out.notesDropped = `The AI's note mentioned ${claims.join(', ')}, which the proposal doesn't set, so RegLens removed it.`;
+  }
+  return out;
 }

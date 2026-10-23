@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { parseIntent, parseProposal, proposalContext, runC, splitC, verifyProposal, type Proposal } from '../src/lib/propose';
+import {
+  computedPlan,
+  finalizeProposal,
+  generateC,
+  parseIntent,
+  parseProposal,
+  proposalContext,
+  pscArrFor,
+  runC,
+  splitC,
+  unbackedNoteClaims,
+  verifyProposal,
+  type Proposal,
+} from '../src/lib/propose';
 import { device } from './helpers';
 
 const f411 = () => device('stm32f411');
@@ -102,14 +115,17 @@ describe('verifyProposal', () => {
   });
   it('checks a BRR against the requested baud at the stated clock', () => {
     const good: Proposal = {
-      writes: [{ register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] }],
-      c: ['USART2->BRR = (27U << 4) | 2U;'],
+      writes: [
+        { register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+        { register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }, { name: 'TE', value: 1 }, { name: 'RE', value: 1 }] },
+      ],
+      c: ['USART2->BRR = (27U << 4) | 2U;', 'USART2->CR1 |= (1U << 13) | (1U << 3) | (1U << 2);'],
     };
     const req = 'USART2 115200 baud at 50 MHz APB1';
     expect(fails(verifyProposal(f411(), req, good))).toEqual([]);
     const bad = structuredClone(good);
     bad.writes[0].fields = [{ name: 'DIV_Mantissa', value: 8 }, { name: 'DIV_Fraction', value: 11 }];
-    bad.c = ['USART2->BRR = 0x8BU;'];
+    bad.c[0] = 'USART2->BRR = 0x8BU;';
     expect(fails(verifyProposal(f411(), req, bad))).toEqual(['The proposed BRR gives 359712 baud at 50 MHz, not 115200 (212.25%).']);
   });
   it('checks PWM frequency and duty, PWM mode and channel enable', () => {
@@ -161,5 +177,107 @@ describe('proposalContext', () => {
   });
   it('asks for a pin or peripheral when the request names neither', () => {
     expect(proposalContext(f411(), 'make the LED blink')).toEqual({ error: expect.stringMatching(/Name a pin/) });
+  });
+});
+
+describe('UART configs must turn the UART on', () => {
+  it('fails when UE, TE or RE is missing (the live failure of Oct 22)', () => {
+    const p: Proposal = {
+      writes: [
+        { register: 'RCC->APB1ENR', fields: [{ name: 'USART2EN', value: 1, meaning: 'Enabled' }] },
+        { register: 'USART2->BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+        { register: 'USART2->CR1', fields: [{ name: 'OVER8', value: 0 }, { name: 'UE', value: 1 }] },
+      ],
+      c: [],
+    };
+    const v = verifyProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', finalizeProposal(f411(), 'USART2 115200 baud at 50 MHz APB1', p));
+    expect(fails(v)).toEqual([
+      'The transmitter must be on (TE = 1) unless the request says RX only, but USART2_CR1.TE is not set.',
+      'The receiver must be on (RE = 1) unless the request says TX only, but USART2_CR1.RE is not set.',
+    ]);
+  });
+  it('TX only needs no RE', () => {
+    const p: Proposal = {
+      writes: [
+        { register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+        { register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }, { name: 'TE', value: 1 }] },
+      ],
+      c: [],
+    };
+    const req = 'USART2 TX only, 115200 baud at 50 MHz';
+    expect(fails(verifyProposal(f411(), req, finalizeProposal(f411(), req, p)))).toEqual([]);
+  });
+});
+
+describe('computedPlan', () => {
+  it('computes BRR and the UART enables from baud and clock', () => {
+    const plan = computedPlan(f411(), 'USART2 115200 baud at 50 MHz APB1');
+    expect(plan.fields).toEqual([
+      { register: 'USART2_BRR', field: 'DIV_Mantissa', value: 27 },
+      { register: 'USART2_BRR', field: 'DIV_Fraction', value: 2 },
+      { register: 'USART2_CR1', field: 'UE', value: 1 },
+      { register: 'USART2_CR1', field: 'TE', value: 1 },
+      { register: 'USART2_CR1', field: 'RE', value: 1 },
+      { register: 'USART2_CR1', field: 'OVER8', value: 0 },
+      { register: 'RCC_APB1ENR', field: 'USART2EN', value: 1 },
+    ]);
+    expect(plan.lines[0]).toBe('USART2_BRR.DIV_Mantissa = 27, USART2_BRR.DIV_Fraction = 2 (BRR = 0x01B2) give 115207 baud at 50 MHz (0.01% from 115200).');
+  });
+  it('computes H7 BRR as one 16-bit field', () => {
+    const plan = computedPlan(device('stm32h743'), 'USART3 115200 baud at 100 MHz');
+    expect(plan.fields[0]).toEqual({ register: 'USART3_BRR', field: 'BRR', value: 868 });
+  });
+  it('computes PSC, ARR, CCR and the PWM enables', () => {
+    const plan = computedPlan(f411(), 'TIM2 channel 1 PWM at 1 kHz, 25% duty, timer clock 100 MHz');
+    expect(plan.fields).toEqual([
+      { register: 'TIM2_PSC', field: 'PSC', value: 99 },
+      { register: 'TIM2_ARR', field: 'ARR', value: 999 },
+      { register: 'TIM2_CCR1', field: 'CCR', value: 250 },
+      { register: 'TIM2_CCMR1_Output', field: 'OC1M', value: 6 },
+      { register: 'TIM2_CCER', field: 'CC1E', value: 1 },
+      { register: 'TIM2_CR1', field: 'CEN', value: 1 },
+      { register: 'RCC_APB1ENR', field: 'TIM2EN', value: 1 },
+    ]);
+  });
+  it('says what is missing instead of guessing a clock', () => {
+    expect(computedPlan(f411(), 'USART2 9600 baud').lines[0]).toMatch(/No bus clock/);
+  });
+  it('pscArrFor prefers ARR + 1 = 1000 and falls back to an exact split', () => {
+    expect(pscArrFor(100000)).toEqual({ psc: 99, arr: 999 });
+    expect(pscArrFor(72e6 / 50)).toEqual({ psc: 1439, arr: 999 });
+    expect(pscArrFor(50)).toEqual({ psc: 0, arr: 49 });
+  });
+  it('a proposal built from the plan verifies', () => {
+    const req = 'TIM2 channel 1 PWM at 1 kHz, 25% duty, timer clock 100 MHz';
+    const plan = computedPlan(f411(), req);
+    const byReg = new Map<string, { name: string; value: number }[]>();
+    for (const f of plan.fields) byReg.set(f.register, [...(byReg.get(f.register) ?? []), { name: f.field, value: f.value }]);
+    const p = finalizeProposal(f411(), req, { writes: [...byReg].map(([register, fields]) => ({ register, fields })), c: [] });
+    expect(fails(verifyProposal(f411(), req, p))).toEqual([]);
+  });
+});
+
+describe('generateC and notes', () => {
+  it('writes read-modify-write per register, plain writes for whole-register fields, RCC first', () => {
+    const c = generateC(f411(), [
+      { register: 'GPIOA_MODER', fields: [{ name: 'MODER5', value: 1 }] },
+      { register: 'TIM2->PSC', fields: [{ name: 'PSC', value: 99 }] },
+      { register: 'RCC_AHB1ENR', fields: [{ name: 'GPIOAEN', value: 1 }] },
+      { register: 'GPIOA_BSRR', fields: [{ name: 'BS5', value: 1 }] },
+    ]);
+    expect(c).toEqual([
+      'RCC->AHB1ENR = (RCC->AHB1ENR & ~0x1U) | 0x1U;',
+      'GPIOA->MODER = (GPIOA->MODER & ~0xC00U) | 0x400U;',
+      'TIM2->PSC = 0x63U;',
+      'GPIOA->BSRR = 0x20U;',
+    ]);
+  });
+  it('drops a note that claims fields the writes do not set', () => {
+    const p: Proposal = { writes: [{ register: 'USART2_CR1', fields: [{ name: 'UE', value: 1 }] }], c: [], notes: 'Enable USART2 with TE and RE, transmitter enabled' };
+    expect(unbackedNoteClaims(f411(), 'USART2 115200 baud', p)).toEqual(['TE', 'RE', 'transmitter enabled (TE)']);
+    const f = finalizeProposal(f411(), 'USART2 115200 baud', p);
+    expect(f.notes).toBeUndefined();
+    expect(f.notesDropped).toMatch(/mentioned TE, RE/);
+    expect(f.cSource).toBe('reglens');
   });
 });

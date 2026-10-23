@@ -43,6 +43,27 @@ const GOOD = JSON.stringify({
 const WRONG = GOOD.replace('"value":1,"meaning":"Output"', '"value":2,"meaning":"Alternate"').replace('(0x1U << 10)', '(0x2U << 10)');
 
 describe('/api/propose', () => {
+  it('gives the model the values RegLens computed, and verifies a proposal that copies them', async () => {
+    const reply = JSON.stringify({
+      writes: [
+        { register: 'RCC_APB1ENR', fields: [{ name: 'USART2EN', value: 1, meaning: 'Enabled' }] },
+        { register: 'USART2_BRR', fields: [{ name: 'DIV_Mantissa', value: 27 }, { name: 'DIV_Fraction', value: 2 }] },
+        { register: 'USART2_CR1', fields: [{ name: 'UE', value: 1, meaning: 'Enabled' }, { name: 'TE', value: 1, meaning: 'Enabled' }, { name: 'RE', value: 1, meaning: 'Enabled' }, { name: 'OVER8', value: 0, meaning: 'Oversample16' }] },
+      ],
+      notes: 'USART2 at 115200 baud from a 50 MHz APB1, TX and RX enabled.',
+    });
+    const calls = stubModel([reply]);
+    const body = await (await post(propose, { chip: 'stm32f411', request: 'USART2 115200 baud at 50 MHz APB1' })).json();
+    expect(calls[0].user).toMatch(/USART2_BRR.DIV_Mantissa = 27, USART2_BRR.DIV_Fraction = 2 \(BRR = 0x01B2\)/);
+    expect(body.verification.verified).toBe(true);
+    expect(body.proposal.c).toEqual([
+      'RCC->APB1ENR = (RCC->APB1ENR & ~0x20000U) | 0x20000U;',
+      'USART2->BRR = 0x1B2U;',
+      'USART2->CR1 = (USART2->CR1 & ~0xA00CU) | 0x200CU;',
+    ]);
+    expect(body.proposal.notes).toMatch(/TX and RX enabled/);
+  });
+
   it('returns a verified proposal on the first try', async () => {
     const calls = stubModel([GOOD]);
     const res = await post(propose, { chip: 'stm32f411', request: 'PA5 push-pull output, no pull' });
@@ -50,6 +71,8 @@ describe('/api/propose', () => {
     expect(res.status).toBe(200);
     expect(body.verification.verified).toBe(true);
     expect(body.attempts).toBe(1);
+    expect(body.proposal.cSource).toBe('reglens');
+    expect(body.proposal.c[0]).toBe('GPIOA->MODER = (GPIOA->MODER & ~0xC00U) | 0x400U;');
     expect(calls[0].user).toMatch(/MODER5 bits \[11:10\] values: 0=Input, 1=Output/);
   });
   it('retries once with the failed checks, and returns the corrected proposal', async () => {
@@ -93,6 +116,10 @@ describe('/api/explain doctor mode', () => {
     const body = await (await post(explain, req)).json();
     expect(body.model).toBe('decoder');
     expect(body.text).toMatch(/^RegLens found 1 issue:/);
+    // The fallback keeps the whole finding: the clock mismatch and the corrected BRR.
+    expect(body.text).toMatch(/only with a 16\.013 MHz \(HSI\) clock/);
+    expect(body.text).toMatch(/BRR = 0x01B2 \(DIV_Mantissa = 27, DIV_Fraction = 2\)/);
+    expect(body.rejected).toEqual(["230,400 baud isn't a number RegLens computed"]);
   });
   it('keeps the single-register mode working', async () => {
     stubModel(['GPIOA_MODER sets PA5 as an input: MODER5 = 0b00.']);
