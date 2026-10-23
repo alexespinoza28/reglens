@@ -34,14 +34,15 @@ The browser sends only identifiers and raw text: `{chip, register, value}` for o
 - Single register: facts are one line per field, with identical neighbors grouped. Every `FIELD = 0b…` claim in the reply is checked against the decode.
 - Doctor: facts are the findings with their evidence, the computed numbers with formulas, the clocks and the changed fields. Every `REGISTER.FIELD = value` and `FIELD = value` claim must match the dump (or a fix a finding suggests), and every number with a unit (Hz, kHz, MHz, baud, %) must be one RegLens computed.
 
-A reply that fails is retried once at temperature 0 with the misstatements listed; if it still fails, the deterministic summary is shown instead and labeled as such.
+A divider quoted by its meaning (`PPRE1 = 2` for Div2) and any number the facts themselves state (VCO, baud at HSI) are accepted. A reply that fails is retried once at temperature 0 with the misstatements listed; if it still fails, the deterministic summary (every finding in full, with evidence) is shown instead, and the response lists the refused claims under `rejected`.
 
 ## Write a config (`api/propose.ts`, `src/lib/propose.ts`)
 
 1. `proposalContext` picks the registers the request names: a pin (`PA5`) brings that pin's MODER/OTYPER/OSPEEDR/PUPDR/ODR/AFR fields (CRL/CRH on F103); a peripheral (`USART2`, `TIM2`) brings its configuration registers; both bring the RCC enable bit. Each field is listed with its bits and named values.
-2. Nemotron replies with JSON: field values with the meaning it intends, and one C statement per register.
-3. `verifyProposal` checks: the registers and fields exist and are writable; values fit and are named values; the stated meanings match the SVD names; the request's words (input/output/alternate/analog, push-pull/open-drain, pull-up/down/none, AFn, F103 speed) and numbers (baud at a stated clock, PWM frequency and duty at a stated timer clock) match; and the C lines, run by `runC` (integer literals, `~ << >> | & ^ + - *`, parentheses and casts; any other name is rejected) from four start values, set exactly the proposed fields and leave every other bit alone.
-4. A failing proposal is sent back once with the failures. The browser re-runs `verifyProposal` on its own copy of the chip data and shows the badge from that result. A proposal that fails is shown as **Not verified**, with the C struck through and no copy button.
+2. `computedPlan` does the arithmetic the model is bad at, from the request itself: BRR from the baud rate and stated clock, PSC/ARR/CCR from the PWM frequency, duty and timer clock (ARR + 1 = 1000 when it divides evenly), plus the enable bits those setups need (UART `UE/TE/RE`, `OVER8`; timer `OCxM = 6`, `CCxE`, `CEN`; the RCC enable). These go into the prompt as RegLens-computed facts, and again in the retry.
+3. Nemotron replies with JSON: field values with the meaning it intends. It does not write C: `generateC` writes one read-modify-write per register from the field values (a plain write when the fields cover the whole register), RCC first. A note that mentions fields the writes don't set is dropped.
+4. `verifyProposal` checks: the registers and fields exist and are writable; values fit and are named values; the stated meanings match the SVD names; the request's words (input/output/alternate/analog, push-pull/open-drain, pull-up/down/none, AFn, F103 speed) and numbers (baud at a stated clock, PWM frequency and duty at a stated timer clock) match; a UART configuration turns on `UE`, `TE` and `RE` (unless the request says TX or RX only) and a PWM request sets `CEN`; and the C lines, run by `runC` (integer literals, `~ << >> | & ^ + - *`, parentheses and casts; any other name is rejected) from four start values, set exactly the proposed fields and leave every other bit alone.
+5. A failing proposal is sent back once with the failures. The browser re-runs `verifyProposal` on its own copy of the chip data and shows the badge from that result. A proposal that fails is shown as **Not verified**, with the C struck through and no copy button.
 
 ## Model client (`api/_nvidia.ts`)
 
@@ -49,7 +50,7 @@ Calls `https://integrate.api.nvidia.com/v1/chat/completions` with plain `fetch`.
 
 ## Tests
 
-`npm test` runs Vitest over `tests/`: dump parsing, address mapping, each rule, the baud/PWM/clock formulas, write-mode verification and the C interpreter, the single-register Explain checks, and both API routes end to end with the model stubbed.
+`node scripts/live_check.mjs https://reglens-five.vercel.app all 2` measures live pass rates for the doctor examples and three Write requests against a deployment. `npm test` runs Vitest over `tests/`: dump parsing, address mapping, each rule, the baud/PWM/clock formulas, write-mode verification and the C interpreter, the single-register Explain checks, and both API routes end to end with the model stubbed.
 
 ## Layout
 

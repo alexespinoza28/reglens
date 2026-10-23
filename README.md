@@ -1,7 +1,7 @@
 # RegLens
 
 **A peripheral doctor for STM32.** Paste a register dump from GDB and RegLens names every bit from the chip's SVD, finds the register that contradicts another (clock gated off, pin on the wrong alternate function, BRR computed for the wrong clock), and computes the real baud rate and PWM frequency.
-**Ask it for a setup in plain English** and the AI proposes register values and C, which RegLens decodes and marks *Verified* or *Not verified* before you see them.
+**Ask it for a setup in plain English** and the AI picks the register fields; RegLens does the arithmetic, generates the C, and marks the result *Verified* or *Not verified* before you see it.
 No IDE, no hardware connection, no sign-in: it works from a pasted log, and every view is a shareable link.
 
 **Live:** https://reglens-five.vercel.app · [Black Pill USART2 example](https://reglens-five.vercel.app/#doctor/stm32f411/eyJ0IjoiKGdkYikgeC8zd3ggMHg0MDAyMzgwMFxuMHg0MDAyMzgwMDpcdDB4MDMwMzc1ODNcdDB4MDQ0MDMyMTlcdDB4MDAwMDEwMGFcbihnZGIpIHgvMXd4IDB4NDAwMjM4MzBcbjB4NDAwMjM4MzA6XHQweDAwMDAwMDAxXG4oZ2RiKSB4LzF3eCAweDQwMDIzODQwXG4weDQwMDIzODQwOlx0MHgxMDAyMDAwMFxuKGdkYikgeC8xMHd4IDB4NDAwMjAwMDBcbjB4NDAwMjAwMDA6XHQweGE4MDAwMGEwXHQweDAwMDAwMDAwXHQweDBjMDAwMGYwXHQweDY0MDAwMDQwXG4weDQwMDIwMDEwOlx0MHgwMDAwYzQwY1x0MHgwMDAwMDAwMFx0MHgwMDAwMDAwMFx0MHgwMDAwMDAwMFxuMHg0MDAyMDAyMDpcdDB4MDAwMDc3MDBcdDB4MDAwMDAwMDBcbihnZGIpIHgvNHd4IDB4NDAwMDQ0MDBcbjB4NDAwMDQ0MDA6XHQweDAwMDAwMGMwXHQweDAwMDAwMDAwXHQweDAwMDAwMDhiXHQweDAwMDAyMDBjIiwicSI6IlVTQVJUMiBvbiBQQTIvUEEzIHByaW50cyBnYXJiYWdlIGF0IDExNTIwMCBiYXVkIiwiaCI6IiIsImExIjoiIiwiYTIiOiIiLCJ0MSI6IiIsInQyIjoiIiwiYiI6IiJ9)
@@ -25,7 +25,7 @@ VS Code Cortex-Debug, STM32CubeIDE's SFR view and PyCortexMDebug already decode 
 | Tab | Input | Output |
 | --- | --- | --- |
 | **Peripheral doctor** | GDB `x/Nwx`, OpenOCD `mdw`, `p/x *GPIOA`, or `GPIOA->MODER = 0x...` lines, mixed | Findings with field citations, computed baud/PWM, clock tree, every decoded register, optional AI summary |
-| **Write a config** | "PA5 push-pull output, no pull", "USART2 115200 baud at 50 MHz APB1" | AI-proposed field values and C, with the checks RegLens ran and a Verified / Not verified badge |
+| **Write a config** | "PA5 push-pull output, no pull", "USART2 115200 baud at 50 MHz APB1" | AI-chosen field values, RegLens-computed BRR/PSC/ARR/CCR and generated C, with the checks RegLens ran and a Verified / Not verified badge |
 | **Decode a register** | One register name and value | Reference-manual style bitfield figure, named values, changed-from-reset and reserved-bit markers, click-to-flip |
 
 The doctor's rules, all deterministic:

@@ -92,7 +92,7 @@ Source: `scope.md > Inspiration & Identity`. Reads like a reference-manual regis
 ### Write a config
 
 - As a developer, I want to describe a setup in words and get register values I can trust.
-  - [ ] The AI proposes field values and C lines for the request, using only registers and fields from the chip's SVD.
+  - [ ] The AI proposes field values for the request, using only registers and fields from the chip's SVD. RegLens computes the arithmetic (BRR, PSC, ARR, CCR) and the required enable bits from the request and gives them to the AI, and writes the C lines itself from the field values (changed Oct 22 after the first live test).
   - [ ] RegLens checks every proposal: the register and field exist and are writable, each value fits and is a named value, the AI's stated meaning matches the SVD name, the request's words (input/output/alternate/analog, push-pull/open-drain, pull-up/down/none) and numbers (a baud rate, or a PWM frequency and duty, at a stated clock) match the values, and the C lines, run from several start values, set exactly those fields and nothing else.
   - [ ] A passing proposal shows **Verified by the decoder** with the checks listed and a copy button for the C lines.
   - [ ] A failing proposal shows **Not verified** with each failed check; it is never presented as correct, and there is no copy button.

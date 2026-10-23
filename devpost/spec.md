@@ -92,7 +92,7 @@ Math: `usartBaud()` (RM0090 "Fractional baud rate generation": baud = f_CK / (8 
 PRD ref: `prd.md > Cross-register findings`, `prd.md > Computed quantities`, `prd.md > Explain`.
 
 ### Proposal verifier (`src/lib/propose.ts`)
-`proposalContext(device, request)` picks registers from pins (`PA5` → GPIOA pin-5 fields) and peripheral names (`USART2`, plus its RCC enable register) and formats their fields and named values for the prompt. `parseProposal(text)` extracts the model's JSON. `verifyProposal(device, request, proposal)` runs the checks in `prd.md > Write a config`, including `runC()`, a tiny interpreter for `PERIPH->REG = / |= / &= expr;` with integer literals, `~ << >> | & ^ + -`, parentheses and casts; any other identifier fails the check.
+`proposalContext(device, request)` picks registers from pins (`PA5` → GPIOA pin-5 fields) and peripheral names (`USART2`, plus its RCC enable register) and formats their fields and named values for the prompt. `computedPlan(device, request)` computes BRR / PSC / ARR / CCR and the required enable bits from the request so the model never does arithmetic. `parseProposal(text)` extracts the model's JSON; `generateC()` writes the C from the field values (decided after the Oct 22 live test, where the model omitted C and miscalculated BRR). `verifyProposal(device, request, proposal)` runs the checks in `prd.md > Write a config`, including `runC()`, a tiny interpreter for `PERIPH->REG = / |= / &= expr;` with integer literals, `~ << >> | & ^ + -`, parentheses and casts; any other identifier fails the check.
 PRD ref: `prd.md > Write a config`.
 
 ### Page (`src/App.tsx`, `src/components/*`)
