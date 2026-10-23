@@ -42,7 +42,8 @@ Rules:
 - Use only the facts given. Do not add problems the findings don't list, and never invent fields, values or numbers.
 - Lead with one sentence naming the most likely cause, taken from the first error finding. If there are no findings, say the tool's rules found no cross-register problem, then say what the registers configure.
 - Then up to 4 short "- " bullets: the fix for each finding in plain words. Cite fields as REGISTER.FIELD = value, copied exactly from the evidence.
-- Copy every number exactly as given, with its unit (baud, MHz, kHz, Hz, %). Do not compute new numbers.
+- Copy every number exactly as given, with its unit (baud, MHz, kHz, Hz, %). Only use numbers that appear in the facts; do not compute new ones.
+- Write field values the way the evidence does: REGISTER.FIELD = value, with the same number.
 - If the developer describes a problem, connect it to the findings when the facts support it, and say plainly when they don't.
 - Plain text only: no headings, no bold, no code blocks. Under 160 words.`;
 
@@ -141,6 +142,7 @@ async function explainDump(device: DeviceJson, dumpText: string, body: Record<st
   if (!first.ok) return first.response;
   let errors = verifyDoctorReply(first.text, dump, dx, opts);
   if (!errors.length) return json(200, { text: first.text, model: first.model, verified: true });
+  const rejected = [...errors];
   const retry = await retrySame(
     first,
     DOCTOR_SYSTEM,
@@ -148,13 +150,16 @@ async function explainDump(device: DeviceJson, dumpText: string, body: Record<st
   );
   if (retry) {
     errors = verifyDoctorReply(retry, dump, dx, opts);
-    if (!errors.length) return json(200, { text: retry, model: first.model, verified: true });
+    if (!errors.length) return json(200, { text: retry, model: first.model, verified: true, rejected });
+    rejected.push(...errors);
   }
   console.warn(`[explain] doctor reply failed verification: ${errors.join('; ')}`);
   return json(200, {
     text: `${findingsSummary(dx)}\n\n(The AI summary was withheld because it misstated a value.)`,
     model: 'decoder',
     verified: true,
+    // The claims the checker refused, so a withheld reply can be diagnosed. Decoder facts only, nothing secret.
+    rejected: [...new Set(rejected)],
   });
 }
 

@@ -168,6 +168,9 @@ describe('verifyDoctorReply', () => {
       "42 MHz isn't a number RegLens computed",
     ]);
   });
+  it('accepts dividers quoted by meaning and any number the facts state', () => {
+    expect(verifyDoctorReply('PLLP = 2, PPRE1 = 2, so APB1 is 50 MHz from a 200 MHz VCO; at HSI 16 MHz this BRR gives 115,108 baud (-0.08%).', m, dx, o)).toEqual([]);
+  });
   it('fallback summary lists findings and computed numbers', () => {
     const s = findingsSummary(dx);
     expect(s).toMatch(/RegLens found 1 issue/);

@@ -112,10 +112,10 @@ export function deriveClocks(device: DeviceJson, view: DumpView, o: ClockOverrid
         else if (input === undefined) notes.push('PLL runs from HSE; enter the HSE crystal frequency.');
         else {
           sys = (input / m) * n / p;
-          steps.push(
-            `SYSCLK = PLL = ${src ? 'HSE' : 'HSI'} ${MHz(input)} / PLLM ${m} × PLLN ${n} / PLLP ${p} = ${MHz(sys)}`,
-          );
           const vco = (input / m) * n;
+          steps.push(
+            `SYSCLK = PLL = ${src ? 'HSE' : 'HSI'} ${MHz(input)} / PLLM ${m} × PLLN ${n} / PLLP ${p} = ${MHz(sys)} (PLL input ${MHz(input / m)}, VCO ${MHz(vco)})`,
+          );
           if (input / m < 1e6 || input / m > 2e6) notes.push(`PLL input ${MHz(input / m)} is outside the 1–2 MHz range the reference manual allows.`);
           if (vco < 100e6 || vco > 432e6) notes.push(`VCO ${MHz(vco)} is outside 100–432 MHz.`);
         }

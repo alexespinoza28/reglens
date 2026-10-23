@@ -205,13 +205,14 @@ function rulePinMux(device: DeviceJson, view: DumpView, fam: Family, targets: st
         const out = isOutputSignal(signal);
         if (out ? states.some(({ s }) => s.mode === 'af') : states.some(({ s }) => s.mode === 'input')) continue;
         const gp = states.find(({ s }) => s.mode === 'output');
-        const odr = signal.includes('I2C') ? 'open-drain (CNF = 0b11)' : 'push-pull (CNF = 0b10)';
+        const odrFor = (n: number) => (signal.includes('I2C') ? `open-drain (CNF${n} = 0b11)` : `push-pull (CNF${n} = 0b10)`);
+        const odr = odrFor(states[0].r.n);
         if (out && gp) {
           findings.push({
             rule: 'pin-mux',
             severity: 'error',
             title: `${gp.r.pin} is a general-purpose output, not ${signal}`,
-            detail: `${gp.r.pin} is set as an output with CNF${gp.r.n} = 0b${gp.s.cnf!.toString(2).padStart(2, '0')} (general-purpose ${gp.s.cnf ? 'open-drain' : 'push-pull'}), so the GPIO's ODR drives the pin and ${p} can't. ${signal} needs alternate-function ${odr} on ${gp.r.pin} (${table.source}; RegLens assumes no AFIO remap).`,
+            detail: `${gp.r.pin} is set as an output with CNF${gp.r.n} = 0b${gp.s.cnf!.toString(2).padStart(2, '0')} (general-purpose ${gp.s.cnf ? 'open-drain' : 'push-pull'}), so the GPIO's ODR drives the pin and ${p} can't. ${signal} needs alternate-function ${odrFor(gp.r.n)} on ${gp.r.pin} (${table.source}; RegLens assumes no AFIO remap).`,
             cites: gp.s.cites,
           });
         } else if (out) {
@@ -508,6 +509,10 @@ function usartQuantity(device: DeviceJson, view: DumpView, fam: Family, p: strin
     if (Math.abs(err) > 2) {
       const named = namedClocks(fam, clocks, o.hseHz).find((c) => Math.abs(c.hz - q.numbers.impliedHz!) / c.hz < 0.01);
       q.lines.push(`this BRR gives ${fmtInt(target)} baud only with a ${formatMHz(q.numbers.impliedHz)}${named ? ` (${named.name})` : ''} clock`);
+      if (named) {
+        const atNamed = (baud * named.hz) / fck;
+        q.lines.push(`at ${named.name} ${formatMHz(named.hz)} this BRR gives ${fmtInt(atNamed)} baud (${fmtPct(((atNamed - target) / target) * 100, true)})`);
+      }
     }
   } else {
     const std = nearestStandard(baud);
@@ -599,7 +604,11 @@ function ruleBaud(quantities: Quantity[], o: DoctorOptions, findings: Finding[])
     const explicit = o.targetBaud ?? baudFromQuestion(o.question ?? '');
     const target = q.numbers.target!;
     const fck = q.numbers.clockHz!;
-    const brrFix = q.cites[0].field === 'BRR' ? `BRR = ${Math.round(fck / target)}` : `BRR = ${hex(brrForF4(fck, target, 0), 16)} for ${fmtInt(target)} baud at ${formatMHz(fck)} (16× oversampling)`;
+    const fixVal = brrForF4(fck, target, 0);
+    const brrFix =
+      q.cites[0].field === 'BRR'
+        ? `BRR = ${Math.round(fck / target)}`
+        : `BRR = ${hex(fixVal, 16)} (DIV_Mantissa = ${Math.floor(fixVal / 16)}, DIV_Fraction = ${fixVal % 16}) for ${fmtInt(target)} baud at ${formatMHz(fck)} (16× oversampling)`;
     const implied = q.lines.find((l) => l.startsWith('this BRR gives'));
     findings.push({
       rule: 'baud-error',
@@ -683,13 +692,16 @@ export function findingsSummary(dx: Diagnosis): string {
   const lines: string[] = [];
   if (!dx.findings.length) lines.push("RegLens's rules found no cross-register problem in this dump.");
   else lines.push(`RegLens found ${dx.findings.length} issue${dx.findings.length > 1 ? 's' : ''}:`);
-  for (const f of dx.findings.slice(0, 6)) lines.push(`- ${f.title}. ${f.cites.map(citeText).join('; ')}`);
-  for (const q of dx.quantities) if (q.display) lines.push(`- ${q.title}: ${q.display}`);
+  for (const f of dx.findings.slice(0, 6)) {
+    lines.push(`- ${f.title}. ${f.detail}${f.cites.length ? ` Evidence: ${f.cites.map(citeText).join('; ')}.` : ''}`);
+  }
+  for (const q of dx.quantities) if (q.display) lines.push(`- ${q.title}: ${q.display} (${q.lines.join('; ')})`);
   return lines.join('\n');
 }
 
 const UNIT_KIND: Record<string, 'hz' | 'baud' | 'pct'> = { hz: 'hz', khz: 'hz', mhz: 'hz', baud: 'baud', bps: 'baud', bd: 'baud', '%': 'pct' };
 const UNIT_SCALE: Record<string, number> = { hz: 1, khz: 1e3, mhz: 1e6 };
+const NUM_UNIT = /(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|baud|bps|Bd|%)/gi;
 
 /**
  * Check a doctor summary: every REGISTER.FIELD = value and FIELD = value claim
@@ -700,19 +712,31 @@ export function verifyDoctorReply(text: string, dump: MappedDump, dx: Diagnosis,
   const errors: string[] = [];
   const qualified = new Map<string, number>();
   const bare = new Map<string, Set<number>>();
+  // A divider or multiplier is often quoted by what it means, not its encoding:
+  // PPRE1 = 4 is "Div2", so "PPRE1 = 2" is a fair reading. Same for Mul9, AF7.
+  const meaningNums = new Map<string, Set<number>>();
+  const addTo = (m: Map<string, Set<number>>, k: string, v: number) => {
+    const set = m.get(k) ?? new Set<number>();
+    set.add(v);
+    m.set(k, set);
+  };
   for (const r of dump.registers) {
     for (const f of r.decoded.fields) {
-      qualified.set(`${r.key}.${f.field.name}`.toUpperCase(), f.value);
-      const s = bare.get(f.field.name.toUpperCase()) ?? new Set<number>();
-      s.add(f.value);
-      bare.set(f.field.name.toUpperCase(), s);
+      const q = `${r.key}.${f.field.name}`.toUpperCase();
+      qualified.set(q, f.value);
+      addTo(bare, f.field.name.toUpperCase(), f.value);
+      const mn = f.meaning?.n.match(/^(?:Div|Mul|AF)(\d+)$/i);
+      if (mn) {
+        addTo(meaningNums, q, Number(mn[1]));
+        addTo(meaningNums, f.field.name.toUpperCase(), Number(mn[1]));
+      }
     }
   }
   const regKeys = new Set(dump.registers.map((r) => r.key.toUpperCase()));
   const num = (s: string) => (/^0b/i.test(s) ? parseInt(s.slice(2), 2) : /^0x/i.test(s) ? parseInt(s.slice(2), 16) : Number(s));
   // Values the findings themselves propose as fixes ("Set AFRL0 = 1") are fair to repeat.
   const suggested = new Map<string, Set<number>>();
-  const facts = [...dx.findings.map((f) => f.detail), ...dx.quantities.flatMap((q) => q.lines), ...dx.hints].join('\n');
+  const facts = [...dx.findings.map((f) => f.detail), ...dx.quantities.flatMap((q) => q.lines), ...dx.hints, ...dx.clocks.steps].join('\n');
   for (const m of facts.matchAll(/\b([A-Z][A-Z0-9_]*(?:\.[A-Z][A-Z0-9_]*)?)\s*=\s*(0b[01]+|0x[0-9a-f]+|\d+)\b/gi)) {
     const k = m[1].toUpperCase();
     const set = suggested.get(k) ?? new Set<number>();
@@ -723,7 +747,7 @@ export function verifyDoctorReply(text: string, dump: MappedDump, dx: Diagnosis,
     b.add(num(m[2]));
     suggested.set(bareName, b);
   }
-  const okSuggested = (k: string, v: number) => suggested.get(k)?.has(v) ?? false;
+  const okSuggested = (k: string, v: number) => (suggested.get(k)?.has(v) ?? false) || (meaningNums.get(k)?.has(v) ?? false);
 
   for (const m of text.matchAll(/\b([A-Z][A-Z0-9_]*)\.([A-Z][A-Z0-9_]*)\s*=\s*(0b[01]+|0x[0-9a-f]+|\d+)\b/gi)) {
     const key = `${m[1]}.${m[2]}`.toUpperCase();
@@ -747,13 +771,19 @@ export function verifyDoctorReply(text: string, dump: MappedDump, dx: Diagnosis,
   for (const k of ['sysclk', 'hclk', 'pclk1', 'pclk2', 'tim1', 'tim2'] as const) if (c[k].hz) allowed.hz.push(c[k].hz!);
   if (o.hseHz) allowed.hz.push(o.hseHz);
   allowed.hz.push(16e6, 8e6, 64e6); // internal oscillators
+  // Any number-with-unit the facts state can be repeated (VCO, baud at HSI, ...).
+  for (const m of facts.matchAll(NUM_UNIT)) {
+    const u = m[2].toLowerCase();
+    const v = Number(m[1].replace(/,/g, '')) * (UNIT_SCALE[u] ?? 1);
+    allowed[UNIT_KIND[u]].push(UNIT_KIND[u] === 'pct' ? Math.abs(v) : v);
+  }
   for (const q of dx.quantities) {
     const n = q.numbers;
     for (const v of [n.freqHz, n.impliedHz, n.clockHz]) if (v) allowed.hz.push(v);
     for (const v of [n.baud, n.target]) if (v) allowed.baud.push(v);
     for (const v of [n.errorPct, n.dutyPct]) if (v !== undefined) allowed.pct.push(Math.abs(v), 100 - Math.abs(v));
   }
-  for (const m of text.matchAll(/(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(MHz|kHz|Hz|baud|bps|Bd|%)/gi)) {
+  for (const m of text.matchAll(NUM_UNIT)) {
     const unit = m[2].toLowerCase();
     const kind = UNIT_KIND[unit];
     const v = Number(m[1].replace(/,/g, '')) * (UNIT_SCALE[unit] ?? 1);
